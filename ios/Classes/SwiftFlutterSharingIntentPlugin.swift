@@ -174,13 +174,29 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
            
            let message = userDefaults?.string(forKey: kUserDefaultsMessageKey)
            if let json = userDefaults?.object(forKey: kUserDefaultsKey) as? Data {
-               let sharedArray = decode(data: json)
+               let sharedArray: [SharingFile]
+               do {
+                   sharedArray = try decode(data: json)
+               } catch {
+                   // FSI-61: surface decode failures (e.g. tampered / corrupted
+                   // App Group UserDefaults) to Dart instead of silently
+                   // returning an empty list, which is indistinguishable from
+                   // "no shares received" and hides lateral-movement tampering.
+                   NSLog("[FSI] decode failed: \(error.localizedDescription)")
+                   let err = FlutterError(
+                       code: "DECODE_FAILED",
+                       message: "Failed to decode shared payload",
+                       details: error.localizedDescription
+                   )
+                   eventSinkMedia?(err)
+                   return true
+               }
                let sharedMediaFiles: [SharingFile] = sharedArray.compactMap {
                    guard let value = $0.type == .text || $0.type == .url ? $0.value
                            : getAbsolutePath(for: $0.value) else {
                        return nil
                    }
-                   
+
                    return SharingFile(
                     value: value,
                        mimeType: $0.mimeType,
@@ -333,14 +349,12 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         return (url, orientation)
     }
     
-    private func decode(data: Data) -> [SharingFile] {
-        do {
-            let encodedData = try JSONDecoder().decode([SharingFile].self, from: data)
-            return encodedData
-        } catch {
-            print("Decoding error:", error.localizedDescription)
-            return []
-        }
+    /// Decodes the shared-file payload from the App Group UserDefaults blob.
+    /// Throws on malformed / tampered input (FSI-61). The caller is responsible
+    /// for surfacing the error to Dart via the event sink so the host app can
+    /// distinguish "decode failed" from "no shares received".
+    private func decode(data: Data) throws -> [SharingFile] {
+        return try JSONDecoder().decode([SharingFile].self, from: data)
     }
     
     private func toJson(data: [SharingFile]?) -> String? {
