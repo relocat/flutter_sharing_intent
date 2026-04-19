@@ -7,6 +7,8 @@ import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.media.ThumbnailUtils
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
 import android.webkit.URLUtil
@@ -23,6 +25,8 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URLConnection
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 private const val EVENTS_CHANNEL_MEDIA = "flutter_sharing_intent/events-sharing"
 
@@ -52,6 +56,21 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
 
   private var binding: ActivityPluginBinding? = null
   private lateinit var applicationContext: Context
+
+  /**
+   * Background executor for intent handling work (FSI-24).
+   *
+   * [handleIntent] performs synchronous I/O — ContentResolver file copies for
+   * content:// URIs, video thumbnail generation, and MediaMetadataRetriever
+   * calls — all of which blocked the main thread when the Activity lifecycle
+   * invoked the plugin. Large shared files at cold start could trigger ANR.
+   * Work is marshalled onto this executor; channel emission is posted back to
+   * the main thread via [mainHandler] because FlutterEventSink must be called
+   * from the platform thread. The executor is shut down in
+   * [onDetachedFromEngine].
+   */
+  private val backgroundExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+  private val mainHandler: Handler = Handler(Looper.getMainLooper())
 
   /// To sel channel & event stream
   private fun setupCallbackChannels(binaryMessenger: BinaryMessenger) {
@@ -90,58 +109,78 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
     initialSharing = null
     latestSharing = null
     eventChannel.setStreamHandler(null)
+    backgroundExecutor.shutdown()
   }
 
+  /**
+   * Handles an incoming share intent.
+   *
+   * The computation — ContentResolver file copy, thumbnail generation,
+   * MediaMetadataRetriever — is offloaded to [backgroundExecutor] to avoid
+   * blocking the main thread (FSI-24). The resulting [JSONArray] (if any) is
+   * published to [initialSharing]/[latestSharing] and emitted via
+   * [eventSinkSharing] on the main thread via [mainHandler], because
+   * FlutterEventSink must be called from the platform thread.
+   */
   private fun handleIntent(intent: Intent, initial: Boolean) {
     val intentFlags = intent.getFlags()
-    if ((intentFlags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0){
-      Log.w(TAG,"handleIntent ==>> ${intent.action}, ${intent.type}")
-      when {
-        (intent.type?.startsWith("text") != true)
-                && (intent.action == Intent.ACTION_SEND
-                || intent.action == Intent.ACTION_SEND_MULTIPLE) -> { // Sharing images or videos
+    if ((intentFlags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return
 
+    Log.w(TAG, "handleIntent ==>> ${intent.action}, ${intent.type}")
+    val tag: String = when {
+      (intent.type?.startsWith("text") != true)
+          && (intent.action == Intent.ACTION_SEND
+          || intent.action == Intent.ACTION_SEND_MULTIPLE) -> "Image/Video"
+      (intent.type == null || intent.type?.startsWith("text") == true)
+          && (intent.action == Intent.ACTION_SEND
+          || intent.action == Intent.ACTION_SEND_MULTIPLE) -> "text"
+      intent.action == Intent.ACTION_VIEW -> "ACTION_VIEW"
+      intent.action == Intent.ACTION_WEB_SEARCH -> "ACTION_WEB_SEARCH"
+      else -> return
+    }
 
-          val value = getSharingUris(intent)
-          if (initial) initialSharing = value
-          latestSharing = value
-          Log.w(TAG,"Image/Video : handleIntent ==>> $value")
-          eventSinkSharing?.success(value?.toString())
-        }
-        (intent.type == null || intent.type?.startsWith("text") == true)
-                && (intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE) -> { // Sharing text
-
-          val value = getSharingText(intent) ?: getSharingUris(intent)
-          if (initial) initialSharing = value
-          latestSharing = value
-          Log.w(TAG,"text : handleIntent ==>> $value")
-//          Log.w(TAG,"text : handleIntent ==>> ${eventSinkSharing!=null}")
-          eventSinkSharing?.success(value?.toString())
-
-        }
-        intent.action == Intent.ACTION_VIEW -> { // Opening URL
-          val value = JSONArray().put(
-            JSONObject()
-              .put("value", intent.dataString)
-              .put("type", MediaType.URL.ordinal)
-          )
-          if (initial) initialSharing = value
-          latestSharing = value
-          Log.w(TAG,"ACTION_VIEW : handleIntent ==>> $value")
-          eventSinkSharing?.success(value?.toString())
-        }
-        intent.action == Intent.ACTION_WEB_SEARCH -> {
-            val value = JSONArray().put(
-                JSONObject()
-                    .put("value", intent.getStringExtra(SearchManager.QUERY))
-                    .put("type", MediaType.WEB_SEARCH.ordinal)
-            )
-            if (initial) initialSharing = value
-            latestSharing = value
-            Log.w(TAG,"ACTION_WEB_SEARCH : handleIntent ==>> $value")
-            eventSinkSharing?.success(value?.toString())
-        }
+    backgroundExecutor.execute {
+      val value: JSONArray? = try {
+        computeSharingPayload(intent)
+      } catch (t: Throwable) {
+        Log.e(TAG, "handleIntent failed", t)
+        return@execute
       }
+
+      mainHandler.post {
+        if (initial) initialSharing = value
+        latestSharing = value
+        Log.w(TAG, "$tag : handleIntent ==>> $value")
+        eventSinkSharing?.success(value?.toString())
+      }
+    }
+  }
+
+  /**
+   * Builds the [JSONArray] payload for a share intent. Runs on the background
+   * executor — callers must not invoke this from the main thread because it
+   * performs blocking I/O (see [getSharingUris]).
+   */
+  private fun computeSharingPayload(intent: Intent): JSONArray? {
+    return when {
+      (intent.type?.startsWith("text") != true)
+          && (intent.action == Intent.ACTION_SEND
+          || intent.action == Intent.ACTION_SEND_MULTIPLE) -> getSharingUris(intent)
+      (intent.type == null || intent.type?.startsWith("text") == true)
+          && (intent.action == Intent.ACTION_SEND
+          || intent.action == Intent.ACTION_SEND_MULTIPLE) ->
+        getSharingText(intent) ?: getSharingUris(intent)
+      intent.action == Intent.ACTION_VIEW -> JSONArray().put(
+        JSONObject()
+          .put("value", intent.dataString)
+          .put("type", MediaType.URL.ordinal)
+      )
+      intent.action == Intent.ACTION_WEB_SEARCH -> JSONArray().put(
+        JSONObject()
+          .put("value", intent.getStringExtra(SearchManager.QUERY))
+          .put("type", MediaType.WEB_SEARCH.ordinal)
+      )
+      else -> null
     }
   }
 
