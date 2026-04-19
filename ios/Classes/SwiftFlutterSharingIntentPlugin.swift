@@ -16,7 +16,31 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
     // -> see Example app
     public static let instance = SwiftFlutterSharingIntentPlugin()
 
-    
+    // MARK: - UIScene bridging (FSI-81)
+    //
+    // On iOS 13+ with scene-based hosts (Flutter 3.11+ default), external
+    // URL opens are delivered to `UISceneDelegate` callbacks
+    // (`scene(_:willConnectTo:options:)`, `scene(_:openURLContexts:)`,
+    // `scene(_:continue:)`), bypassing the `UIApplicationDelegate` callbacks
+    // that this plugin historically relied on. Flutter's iOS plugin
+    // registrar does not yet expose a scene-delegate hook, so we expose
+    // static forwarders that the host app's `SceneDelegate` can call.
+    //
+    // The `sharedInstance` reference is populated during `register(with:)`
+    // so the host app can reach the live plugin instance from its own
+    // SceneDelegate. It is a plain strong reference to the existing
+    // `static let instance` singleton; there is no retain cycle because
+    // the plugin is already a process-lifetime object.
+    //
+    // If `sharedInstance` is nil (plugin not yet registered), the
+    // forwarders are safe no-ops — the host SceneDelegate can be wired
+    // unconditionally without crashing.
+    //
+    // See README.relocat.md for the SceneDelegate boilerplate hosts must
+    // install.
+    public static var sharedInstance: SwiftFlutterSharingIntentPlugin?
+
+
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: kAppChannel,binaryMessenger:registrar.messenger())
 
@@ -28,6 +52,68 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
 
         registrar.addApplicationDelegate(instance)
         // registrar.addMethodCallDelegate(instance, channel: channel)
+
+        // FSI-81: expose the live plugin instance to host SceneDelegate
+        // forwarding methods. See UIScene bridging section above.
+        sharedInstance = instance
+    }
+
+    /// Host-side forwarder for `UISceneDelegate.scene(_:openURLContexts:)`
+    /// and the `urlContexts` in `scene(_:willConnectTo:options:)`
+    /// connection options (FSI-81).
+    ///
+    /// Host apps with scene-based lifecycles must call this method from
+    /// their SceneDelegate so that share-extension redirect URLs reach the
+    /// plugin on iOS 13+ (Flutter 3.11+ default). Without this forwarding,
+    /// cold-start share intake is silently broken.
+    ///
+    /// SECURITY: the URL is passed through the same `hasSameSchemePrefix`
+    /// gate used by the AppDelegate path (enforced inside `handleUrl`'s
+    /// callers on the AppDelegate side; here we gate before forwarding so
+    /// that the scene path has equivalent prefix isolation).
+    ///
+    /// CONCURRENCY: must be called on the main thread (scene delegate
+    /// callbacks are main-thread by contract). `handleUrl` may dispatch
+    /// PHAsset resolution asynchronously; results are delivered to the
+    /// event sink from the main queue (see `resolveSharedFiles`).
+    ///
+    /// Safe no-op when the plugin has not yet been registered.
+    @objc public static func handleSceneURLContexts(_ urlContexts: Set<UIOpenURLContext>) {
+        guard let plugin = sharedInstance else { return }
+        for context in urlContexts {
+            let url = context.url
+            if plugin.hasSameSchemePrefix(url: url) {
+                // setInitialData: false matches AppDelegate's
+                // `application(_:open:options:)` warm-start semantics. The
+                // cold-start case (first scene connecting with a URL in
+                // `connectionOptions.urlContexts`) is handled by the host
+                // SceneDelegate calling this same method from
+                // `scene(_:willConnectTo:options:)`; the plugin cannot
+                // distinguish the two, and the effect on Dart-side intake
+                // is equivalent because `getInitialSharing` clears both
+                // caches after the first read.
+                _ = plugin.handleUrl(url: url, setInitialData: false)
+            }
+        }
+    }
+
+    /// Host-side forwarder for `UISceneDelegate.scene(_:continue:)` and
+    /// for `NSUserActivity` entries in `scene(_:willConnectTo:options:)`
+    /// connection options (FSI-81).
+    ///
+    /// Mirrors the existing AppDelegate
+    /// `application(_:continue:restorationHandler:)` semantics — passes
+    /// `setInitialData: true` so cold-start universal-link activity is
+    /// surfaced to Dart via `getInitialSharing`.
+    ///
+    /// Safe no-op when the plugin has not yet been registered or when the
+    /// activity has no `webpageURL`.
+    @objc public static func handleSceneUserActivity(_ userActivity: NSUserActivity) {
+        guard let plugin = sharedInstance,
+              let url = userActivity.webpageURL else { return }
+        if plugin.hasSameSchemePrefix(url: url) {
+            _ = plugin.handleUrl(url: url, setInitialData: true)
+        }
     }
 
     //  public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
