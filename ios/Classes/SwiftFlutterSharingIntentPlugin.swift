@@ -171,7 +171,7 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
            let appGroupId = Bundle.main.object(forInfoDictionaryKey: kAppGroupIdKey) as? String
            let defaultGroupId = "group.\(Bundle.main.bundleIdentifier!)"
            let userDefaults = UserDefaults(suiteName: appGroupId ?? defaultGroupId)
-           
+
            let message = userDefaults?.string(forKey: kUserDefaultsMessageKey)
            if let json = userDefaults?.object(forKey: kUserDefaultsKey) as? Data {
                let sharedArray: [SharingFile]
@@ -191,29 +191,83 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                    eventSinkMedia?(err)
                    return true
                }
-               let sharedMediaFiles: [SharingFile] = sharedArray.compactMap {
-                   guard let value = $0.type == .text || $0.type == .url ? $0.value
-                           : getAbsolutePath(for: $0.value) else {
-                       return nil
+               // CONCURRENCY (FSI-72): PHAsset resolution may take seconds on
+               // iCloud downloads (isNetworkAccessAllowed = true). Resolving
+               // asynchronously prevents main-thread stalls that can trigger
+               // the iOS app watchdog (8–20s kill).
+               resolveSharedFiles(sharedArray: sharedArray, message: message) { [weak self] resolved in
+                   guard let self = self else { return }
+                   self.latestSharing = resolved
+                   if setInitialData {
+                       self.initialSharing = resolved
                    }
-
-                   return SharingFile(
-                    value: value,
-                       mimeType: $0.mimeType,
-                       thumbnail: getAbsolutePath(for: $0.thumbnail),
-                       duration: $0.duration,
-                       type: $0.type,
-                       message: message
-                   )
+                   self.eventSinkMedia?(self.toJson(data: resolved))
                }
-               latestSharing = sharedMediaFiles
-               if(setInitialData) {
-                   initialSharing = latestSharing
-               }
-               eventSinkMedia?(toJson(data: latestSharing))
            }
            return true
        }
+
+    /// Resolves a decoded `[SharingFile]` payload into a list with absolute
+    /// paths substituted for PHAsset local identifiers. Runs PHAsset
+    /// resolution asynchronously and invokes `completion` on the main queue
+    /// once every item has been resolved (or determined to be missing).
+    ///
+    /// CONCURRENCY (FSI-72): each PHAsset request may block on an iCloud
+    /// download; we fan out with `DispatchGroup` so the main thread stays
+    /// responsive. Result order is preserved via an index-keyed table —
+    /// PHImageManager completions fire on an arbitrary queue, so the
+    /// shared table is guarded by `NSLock`.
+    private func resolveSharedFiles(
+        sharedArray: [SharingFile],
+        message: String?,
+        completion: @escaping ([SharingFile]) -> Void
+    ) {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var resolvedByIndex: [Int: SharingFile] = [:]
+
+        for (index, item) in sharedArray.enumerated() {
+            group.enter()
+            // Resolve the primary value (skip PHAsset lookup for text/url types).
+            let resolveValue: (@escaping (String?) -> Void) -> Void = { cb in
+                if item.type == .text || item.type == .url {
+                    cb(item.value)
+                } else {
+                    self.getAbsolutePathAsync(for: item.value, completion: cb)
+                }
+            }
+
+            resolveValue { resolvedValue in
+                guard let value = resolvedValue else {
+                    // Missing primary value — drop this item, preserving the
+                    // historical `compactMap` behaviour.
+                    group.leave()
+                    return
+                }
+                self.getAbsolutePathAsync(for: item.thumbnail) { resolvedThumbnail in
+                    let file = SharingFile(
+                        value: value,
+                        mimeType: item.mimeType,
+                        thumbnail: resolvedThumbnail,
+                        duration: item.duration,
+                        type: item.type,
+                        message: message
+                    )
+                    lock.lock()
+                    resolvedByIndex[index] = file
+                    lock.unlock()
+                    group.leave()
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            // Reassemble in the original order, dropping indexes where the
+            // primary value failed to resolve.
+            let ordered: [SharingFile] = (0..<sharedArray.count).compactMap { resolvedByIndex[$0] }
+            completion(ordered)
+        }
+    }
     
 //    private func handleUrl(url: URL?, setInitialData: Bool) -> Bool {
 //        if let url = url {
@@ -316,37 +370,42 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         return nil;
     }
     
-    private func getAbsolutePath(for identifier: String?) -> String? {
+    /// Resolves a shared identifier to an absolute filesystem path,
+    /// downloading iCloud-resident PHAssets as needed. Invokes `completion`
+    /// with `nil` if the identifier is empty or the asset cannot be
+    /// resolved.
+    ///
+    /// CONCURRENCY (FSI-72): replaces the previous synchronous
+    /// `DispatchSemaphore`-blocked implementation, which could stall the
+    /// main thread for tens of seconds on iCloud downloads and trigger the
+    /// iOS app watchdog. `requestContentEditingInput` is inherently async;
+    /// we now honour that shape instead of forcing it back to sync.
+    ///
+    /// The `completion` closure may fire on an arbitrary PHImageManager
+    /// queue; callers are responsible for synchronising any shared state
+    /// they mutate inside the callback.
+    private func getAbsolutePathAsync(for identifier: String?, completion: @escaping (String?) -> Void) {
         guard let identifier else {
-                  return nil
-              }
-        
+            completion(nil)
+            return
+        }
+
         if (identifier.starts(with: "file://") || identifier.starts(with: "/var/mobile/Media") || identifier.starts(with: "/private/var/mobile")) {
-            return identifier.replacingOccurrences(of: "file://", with: "")
+            completion(identifier.replacingOccurrences(of: "file://", with: ""))
+            return
         }
         guard let phAsset = PHAsset.fetchAssets(
                  withLocalIdentifiers: [identifier],
                  options: .none).firstObject else {
-                 return nil
-             }
-        
-        let (url, _) = getFullSizeImageURLAndOrientation(for: phAsset)
-        return url
-    }
-    
-    private func getFullSizeImageURLAndOrientation(for asset: PHAsset)-> (String?, Int) {
-        var url: String? = nil
-        var orientation: Int = 0
-        let semaphore = DispatchSemaphore(value: 0)
-        let options2 = PHContentEditingInputRequestOptions()
-        options2.isNetworkAccessAllowed = true
-        asset.requestContentEditingInput(with: options2){(input, info) in
-            orientation = Int(input?.fullSizeImageOrientation ?? 0)
-            url = input?.fullSizeImageURL?.path
-            semaphore.signal()
+            completion(nil)
+            return
         }
-        semaphore.wait()
-        return (url, orientation)
+
+        let options = PHContentEditingInputRequestOptions()
+        options.isNetworkAccessAllowed = true
+        phAsset.requestContentEditingInput(with: options) { (input, _) in
+            completion(input?.fullSizeImageURL?.path)
+        }
     }
     
     /// Decodes the shared-file payload from the App Group UserDefaults blob.
