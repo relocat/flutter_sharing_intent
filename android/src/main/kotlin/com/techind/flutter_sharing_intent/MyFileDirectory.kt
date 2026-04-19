@@ -34,6 +34,15 @@ object MyFileDirectory {
      */
     fun getAbsolutePath(context: Context, uri: Uri): String? {
 
+        // SECURITY: Only content:// URIs are trusted from third-party intents.
+        // file:// and other schemes from untrusted sharers can point at our
+        // own sandbox (FSI-21).
+        if (!"content".equals(uri.scheme, ignoreCase = true)) {
+            Log.w("FlutterSharingIntent",
+                "Rejected non-content URI scheme: ${uri.scheme}")
+            return null
+        }
+
         // DocumentProvider
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT && DocumentsContract.isDocumentUri(context, uri)) {
             // ExternalStorageProvider
