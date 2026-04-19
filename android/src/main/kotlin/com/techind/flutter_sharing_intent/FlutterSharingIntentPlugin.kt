@@ -26,6 +26,8 @@ import java.net.URLConnection
 
 private const val EVENTS_CHANNEL_MEDIA = "flutter_sharing_intent/events-sharing"
 
+private const val THUMBNAIL_TTL_MILLIS = 7L * 24L * 60L * 60L * 1000L
+
 /**
  **  Author - Bhagat Singh
  **  Contact - https://www.linkedin.com/in/bhagat-singh-79496a14b/
@@ -236,8 +238,19 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
     }
   }
 
+  /**
+   * Generates a PNG thumbnail for a shared video and returns its cache path.
+   *
+   * Thumbnails are written to [applicationContext]'s cacheDir keyed by the source
+   * filename. To prevent unbounded growth (FSI-23), this function prunes any
+   * plugin-generated `*.png` entries older than [THUMBNAIL_TTL_MILLIS] before
+   * writing the new thumbnail. The prune is best-effort — failures are logged
+   * and do not abort thumbnail generation.
+   */
   private fun getThumbnail(path: String, type: MediaType): String? {
     if (type != MediaType.VIDEO) return null // get video thumbnail only
+
+    pruneStaleThumbnails(applicationContext.cacheDir)
 
     val videoFile = File(path)
     val targetFile = File(applicationContext.cacheDir, "${videoFile.name}.png")
@@ -248,6 +261,22 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
     }
     bitmap.recycle()
     return targetFile.path
+  }
+
+  // Shared with getThumbnail — evicts stale plugin-generated thumbnails
+  // to prevent unbounded cacheDir growth (FSI-23).
+  private fun pruneStaleThumbnails(cacheDir: File) {
+    val cutoff = System.currentTimeMillis() - THUMBNAIL_TTL_MILLIS
+    try {
+      cacheDir.listFiles { f -> f.isFile && f.name.endsWith(".png") }
+        ?.forEach { file ->
+          if (file.lastModified() < cutoff) {
+            file.delete()
+          }
+        }
+    } catch (e: SecurityException) {
+      Log.w("FlutterSharingIntent", "Thumbnail prune failed: ${e.message}")
+    }
   }
 
   private fun getDuration(path: String, type: MediaType): Long? {
