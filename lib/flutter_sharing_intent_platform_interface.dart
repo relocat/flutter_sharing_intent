@@ -36,4 +36,12 @@ abstract class FlutterSharingIntentPlatform extends PlatformInterface {
   void reset() async {
     throw UnimplementedError('reset() has not been implemented.');
   }
+
+  /// Deletes the listed App Group container file paths. Use after your app
+  /// has finished reading the shared files to minimize on-disk plaintext
+  /// exposure (FSI-31). On Android this is a no-op because the plugin does
+  /// not hold container copies there.
+  Future<void> cleanup(List<String> paths) {
+    throw UnimplementedError('cleanup() has not been implemented.');
+  }
 }

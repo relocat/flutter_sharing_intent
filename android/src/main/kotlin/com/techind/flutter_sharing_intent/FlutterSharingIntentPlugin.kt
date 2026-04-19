@@ -100,6 +100,13 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
         latestSharing = null
         result.success(null)
       }
+      "cleanup" -> {
+        // Android: no-op. Plaintext-gap (FSI-31) only applies to iOS
+        // App Group containers. Android's ContentResolver surfaces URIs
+        // to provider-owned storage rather than persisting a plugin-owned
+        // copy, so there is nothing for the plugin to delete here.
+        result.success(null)
+      }
       else -> result.notImplemented()
     }
   }

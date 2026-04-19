@@ -33,4 +33,9 @@ class MethodChannelFlutterSharingIntent extends FlutterSharingIntentPlatform {
         .map<SharedFile>((file) => SharedFile.fromJson(file))
         .toList();
   }
+
+  @override
+  Future<void> cleanup(List<String> paths) async {
+    await methodChannel.invokeMethod<void>('cleanup', {'paths': paths});
+  }
 }

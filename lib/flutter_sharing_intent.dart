@@ -34,6 +34,18 @@ class FlutterSharingIntent {
     return FlutterSharingIntentPlatform.instance.reset();
   }
 
+  /// Delete the App Group container copies of previously-received shared
+  /// files. Call this after your app has fully ingested the data (e.g.,
+  /// encrypted it into a safer store). On Android this is a no-op because
+  /// the plugin does not hold container copies there.
+  ///
+  /// This API addresses the iOS plaintext-gap (FSI-31): the iOS Share
+  /// Extension copies shared files into the App Group container, and
+  /// without cleanup those plaintext copies persist on disk until the
+  /// host app or OS removes them.
+  Future<void> cleanup(List<String> paths) =>
+      FlutterSharingIntentPlatform.instance.cleanup(paths);
+
   /// Sets up a broadcast stream for receiving incoming media share change events.
   ///
   /// Returns a broadcast [Stream] which emits events to listeners as follows:

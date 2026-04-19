@@ -47,11 +47,60 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
             self.initialSharing = nil
             self.latestSharing = nil
             result(nil);
-            
+
         case "getPlatformVersion" :
             result("iOS " + UIDevice.current.systemVersion);
+
+        case "cleanup":
+            guard let args = call.arguments as? [String: Any],
+                  let paths = args["paths"] as? [String] else {
+                result(FlutterError(code: "INVALID_ARGUMENT",
+                    message: "cleanup requires paths: [String]", details: nil))
+                return
+            }
+            cleanupFiles(paths: paths)
+            result(nil)
+
         default:
             result(FlutterMethodNotImplemented);
+        }
+    }
+
+    /// Resolves the App Group container URL using the same precedence as
+    /// the share extension: the `AppGroupId` Info.plist key if set, otherwise
+    /// the conventional `group.<host-bundle-id>` identifier.
+    private func appGroupContainerURL() -> URL? {
+        let custom = Bundle.main.object(forInfoDictionaryKey: kAppGroupIdKey) as? String
+        let appGroupId = custom ?? "group.\(Bundle.main.bundleIdentifier ?? "")"
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)
+    }
+
+    /// Deletes shared-file copies from the App Group container after the host
+    /// app has processed them (FSI-31). Best-effort: per-file errors are logged
+    /// and swallowed; the method never throws back to Dart. Only file paths
+    /// that are inside the configured App Group container are accepted —
+    /// refuses to delete outside the container as a defensive check.
+    private func cleanupFiles(paths: [String]) {
+        guard let groupUrl = self.appGroupContainerURL() else {
+            NSLog("[FSI] cleanup: no App Group container URL available")
+            return
+        }
+        let containerPath = groupUrl.path
+        let fm = FileManager.default
+        for p in paths {
+            // SECURITY: only delete under our App Group container (FSI-31).
+            // Defends against a caller passing paths outside the container,
+            // which could otherwise trick the plugin into deleting arbitrary
+            // files the host app has read access to.
+            guard p.hasPrefix(containerPath) else {
+                NSLog("[FSI] cleanup: refusing to delete outside container: \(p)")
+                continue
+            }
+            do {
+                try fm.removeItem(atPath: p)
+            } catch {
+                NSLog("[FSI] cleanup failed for \(p): \(error.localizedDescription)")
+            }
         }
     }
     
