@@ -379,9 +379,13 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     func getFileName(from url: URL, type: SharingFileType) -> String {
-        var name = url.lastPathComponent
-        if name.isEmpty { name = UUID().uuidString + "." + getExtension(from: url, type: type) }
-        return name
+        // SECURITY (FSI-93): url.lastPathComponent is attacker-controlled.
+        // Sanitize before using as a destination filename in the App Group container.
+        let raw = url.lastPathComponent
+        if raw.isEmpty {
+            return UUID().uuidString + "." + getExtension(from: url, type: type)
+        }
+        return sanitizedComponent(raw)
     }
     
     func copyFile(at srcURL: URL, to dstURL: URL) -> Bool {
@@ -465,7 +469,45 @@ open class FSIShareViewController: SLComposeServiceViewController {
     
     // MARK: - Logging
     private func log(_ s: String) { if debugLogs { print("[FSIShareVC] \(s)") } }
-    
+
+    // MARK: - Path safety
+
+    /// Sanitize a URL path component so it is safe to use as a filename in
+    /// the App Group container (FSI-93).
+    ///
+    /// Rules applied in order:
+    /// 1. Reject "." and ".." and return "unnamed".
+    /// 2. Strip "/" path separator characters.
+    /// 3. Cap at 255 bytes in UTF-8 (POSIX NAME\_MAX).
+    /// 4. Fall back to "unnamed" for blank or empty results.
+    ///
+    /// - Parameter raw: The raw string (typically `url.lastPathComponent`).
+    /// - Returns: A safe, non-empty filename component.
+    private func sanitizedComponent(_ raw: String) -> String {
+        // Step 1: reject dot-only special names
+        if raw == "." || raw == ".." { return "unnamed" }
+
+        // Step 2: strip path separator characters (NUL is not representable
+        // in Swift String so no explicit NUL strip is needed)
+        let stripped = raw.filter { ch in ch != Character("/") }
+
+        if stripped.isEmpty { return "unnamed" }
+
+        // Step 3: cap at 255 UTF-8 bytes
+        let utf8Bytes = Array(stripped.utf8)
+        guard utf8Bytes.count > 255 else {
+            let safe = stripped
+            if safe == "." || safe == ".." { return "unnamed" }
+            return safe
+        }
+        // Truncate at a Unicode scalar boundary within 255 bytes
+        var end = 255
+        while end > 0 && (utf8Bytes[end] & 0xC0) == 0x80 { end -= 1 }
+        let truncated = String(bytes: Array(utf8Bytes.prefix(end)), encoding: .utf8) ?? "unnamed"
+        if truncated.isEmpty || truncated == "." || truncated == ".." { return "unnamed" }
+        return truncated
+    }
+
 }
 
 // MARK: - Extensions

@@ -30,6 +30,7 @@ Updated as findings are filed. Severity: Critical / High / Medium / Low / Info.
 | FSI-90 | High | Android: no size cap on ContentResolver stream (DoS) | Fixed | TBD |
 | FSI-91 | High | Android: path traversal via _display_name (Tampering) | Fixed | TBD |
 | FSI-92 | High | iOS: no size cap on raw Data payload in handleFileItem (DoS) | Fixed | TBD |
+| FSI-93 | High | iOS: path traversal via url.lastPathComponent (Tampering) | Fixed | TBD |
 
 ## Entry Points
 
@@ -133,6 +134,16 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Fix summary:** Added `private static let kMaxRawDataBytes = 16 * 1024 * 1024` constant (16 MiB) to `FSIShareViewController`. In the `Data` branch of `handleFileItem`, added a `guard raw.count <= Self.kMaxRawDataBytes` check that returns early and logs a `print` diagnostic (consistent with the fork's existing `print`-based logging style) if the payload exceeds the cap.
 **Residual risk:** The `Data` object is loaded into memory before the size check. For very large payloads the memory allocation itself could be a concern, but `NSItemProvider.loadItem` applies its own limits in practice; this guard prevents the disk write.
 
+### FSI-93: iOS — path traversal via url.lastPathComponent (Tampering)
+
+**Severity:** High
+**Affected file:** `ios/Classes/FSIShareViewController.swift` lines 368–372 (pre-fix), specifically `getFileName(from:type:)` and all callers that pass the result to `containerURL()?.appendingPathComponent(...)`.
+**STRIDE category:** Tampering
+**Reproduction sketch:** A source app provides a share attachment whose `URL.lastPathComponent` is `"../../escape"` or a URL-encoded path containing `/`. `getFileName` returned this value verbatim. When passed to `containerURL()?.appendingPathComponent(filename)`, Swift's `URL.appendingPathComponent` does NOT resolve `..` components — it appends them literally, producing a path outside the App Group container directory.
+**Impact:** An attacker-controlled source app could cause shared file copies to land outside the intended App Group container directory, potentially overwriting other files accessible to the extension or the main app.
+**Fix summary:** Added `private func sanitizedComponent(_ raw: String) -> String` helper that: (1) returns "unnamed" for `.` and `..`; (2) strips `/` characters using `filter`; (3) caps at 255 UTF-8 bytes with proper Unicode scalar boundary truncation; (4) returns "unnamed" for blank/empty results. `getFileName(from:type:)` now passes `url.lastPathComponent` through `sanitizedComponent` before returning. All three call sites (`handleImageItem`, `handleVideoItem`, `handleFileItem`) inherit the fix via `getFileName`.
+**Residual risk:** The thumbnail path in `getThumbnailPath(for:)` uses `Data(url.lastPathComponent.utf8).base64EncodedString()` — base64 encoding the raw component makes it safe already; no fix needed there.
+
 ## Dependency & License Review
 
 _(populated by Task C4)_
@@ -155,3 +166,4 @@ _(populated during C5 sign-off)_
 | 2026-04-21 | FSI-90 fix: Android stream size cap (C3). | Relocat maintainers |
 | 2026-04-21 | FSI-91 fix: Android _display_name sanitization (C3). | Relocat maintainers |
 | 2026-04-21 | FSI-92 fix: iOS raw Data size cap (C3). | Relocat maintainers |
+| 2026-04-21 | FSI-93 fix: iOS filename sanitization (C3). | Relocat maintainers |
