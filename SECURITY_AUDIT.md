@@ -27,11 +27,11 @@ Updated as findings are filed. Severity: Critical / High / Medium / Low / Info.
 
 | Finding ID | Severity | Title | Status | Fix commit |
 |---|---|---|---|---|
-| FSI-90 | High | Android: no size cap on ContentResolver stream (DoS) | Fixed | TBD |
-| FSI-91 | High | Android: path traversal via _display_name (Tampering) | Fixed | TBD |
-| FSI-92 | High | iOS: no size cap on raw Data payload in handleFileItem (DoS) | Fixed | TBD |
-| FSI-93 | High | iOS: path traversal via url.lastPathComponent (Tampering) | Fixed | TBD |
-| FSI-94 | Medium | Dart: out-of-range SharedMediaType index crashes isolate (DoS) | Fixed | TBD |
+| FSI-90 | High | Android: no size cap on ContentResolver stream (DoS) | Fixed | `c51b102` |
+| FSI-91 | High | Android: path traversal via _display_name (Tampering) | Fixed | `da04541` |
+| FSI-92 | High | iOS: no size cap on raw Data payload in handleFileItem (DoS) | Fixed | `c0d7d5b` |
+| FSI-93 | High | iOS: path traversal via url.lastPathComponent (Tampering) | Fixed | `abc695e` |
+| FSI-94 | Medium | Dart: out-of-range SharedMediaType index crashes isolate (DoS) | Fixed | `ea0c3fd` |
 
 ## Entry Points
 
@@ -161,7 +161,42 @@ _(populated by Task C4)_
 
 ## Accepted Residual Risks
 
-_(populated during C5 sign-off)_
+The following issues were identified during C2/C3 but are not fixed in this audit. Each has a documented justification for deferral or acceptance.
+
+### R-SI-01: getParcelableArrayListExtra URI count cap (Android)
+
+**File:** `FlutterSharingIntentPlugin.kt` line 216
+**Risk:** A malicious source app can provide an unbounded list of URIs via `EXTRA_STREAM`. Each URI triggers a ContentResolver stream copy; with many URIs the aggregate I/O and storage cost could be significant.
+**Justification for deferral:** The host app enforces a batch cap at its service layer. The plugin's 16 MiB per-file cap (FSI-90) limits per-file damage. Fixing this at the plugin layer requires duplicating a policy decision that belongs to the host app. Tracked as a host-app-level control, not a plugin fix.
+**Owner:** host app service layer.
+
+### R-SI-02: getStringArrayListExtra count/size cap (Android)
+
+**File:** `FlutterSharingIntentPlugin.kt` line 251
+**Risk:** Unbounded list of text strings from `EXTRA_TEXT`; no count or total-size cap before iterating.
+**Justification for deferral:** Same argument as R-SI-01. Text shares are not file I/O; the primary risk is memory pressure, which is limited in practice by Android's IPC Binder transaction size limit (~1 MB). Host app enforces upper limits. Tracked as host-app-level control.
+**Owner:** host app service layer.
+
+### R-SI-03: Unguarded print() statements in FSIShareViewController (iOS)
+
+**File:** `ios/Classes/FSIShareViewController.swift` (multiple lines)
+**Risk:** `print()` calls in the share extension can leak diagnostic information to the system log, visible to any app with the `com.apple.syslog.read` entitlement or to a connected debugger.
+**Justification for deferral:** No key material, credentials, or PII is printed — only filenames, byte counts, and error labels. The existing `log()` helper already gates on `debugLogs = false`. The bare `print` calls are residual from the upstream fork. Tracked as a fork hygiene follow-up.
+**Owner:** fork hygiene follow-up.
+
+### R-SI-04: Empty catch {} in handleFileItem Data branch (iOS)
+
+**File:** `ios/Classes/FSIShareViewController.swift` around line 291 (pre-fix 290)
+**Risk:** `try raw.write(to: dst)` failure is silently swallowed by `catch {}`. A write failure produces no diagnostic and the share silently drops the attachment.
+**Justification for deferral:** Not a security vulnerability (the write failing is safe-fail). It is a reliability concern. Tracked as a fork hygiene follow-up.
+**Owner:** fork hygiene follow-up.
+
+### R-SI-05: Dead code writeTempFile(_:to:) (iOS)
+
+**File:** `ios/Classes/FSIShareViewController.swift` — `writeTempFile` method is defined but unreachable.
+**Risk:** None directly. Dead code that differs from the active path (`writeTempImage`) could create confusion and maintenance risk.
+**Justification for deferral:** Hygiene issue only, not a security finding. Tracked as a fork hygiene follow-up.
+**Owner:** fork hygiene follow-up.
 
 ## Related
 
@@ -179,3 +214,4 @@ _(populated during C5 sign-off)_
 | 2026-04-21 | FSI-92 fix: iOS raw Data size cap (C3). | Relocat maintainers |
 | 2026-04-21 | FSI-93 fix: iOS filename sanitization (C3). | Relocat maintainers |
 | 2026-04-21 | FSI-94 fix: Dart SharedMediaType bounds check (C3). | Relocat maintainers |
+| 2026-04-21 | C3 close: residual risks + SHA backfill. | Relocat maintainers |
