@@ -29,6 +29,7 @@ Updated as findings are filed. Severity: Critical / High / Medium / Low / Info.
 |---|---|---|---|---|
 | FSI-90 | High | Android: no size cap on ContentResolver stream (DoS) | Fixed | TBD |
 | FSI-91 | High | Android: path traversal via _display_name (Tampering) | Fixed | TBD |
+| FSI-92 | High | iOS: no size cap on raw Data payload in handleFileItem (DoS) | Fixed | TBD |
 
 ## Entry Points
 
@@ -122,6 +123,16 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Fix summary:** Added `sanitizeDisplayName(raw: String?): String` helper (marked `internal` for testability). The helper: (1) strips any path-prefix component before the last `/` or `\`; (2) rejects `.` and `..` as "unnamed"; (3) strips C0 control characters and NUL; (4) caps the result at 255 UTF-8 bytes; (5) falls back to "unnamed" for null/blank/empty inputs. `getDataColumn` now passes the raw cursor value through `sanitizeDisplayName` before constructing the `File` object.
 **Residual risk:** Unicode homoglyphs in filenames are not normalized — this is acceptable as they do not affect filesystem path resolution on Android.
 
+### FSI-92: iOS — no size cap on raw Data payload in handleFileItem (DoS)
+
+**Severity:** High
+**Affected file:** `ios/Classes/FSIShareViewController.swift` lines 284–291 (pre-fix)
+**STRIDE category:** Denial of Service
+**Reproduction sketch:** A source app provides a share extension attachment whose `NSItemProvider` loads as a raw `Data` object. `handleFileItem` accepted the `Data` and called `raw.write(to: dst)` with no size check, writing an arbitrarily large blob into the App Group container. A malicious source can fill the shared container, causing subsequent writes by the main app to fail.
+**Impact:** App Group container storage exhaustion; denial of service for the Relocat share-intake pipeline and any other app sharing the same group container.
+**Fix summary:** Added `private static let kMaxRawDataBytes = 16 * 1024 * 1024` constant (16 MiB) to `FSIShareViewController`. In the `Data` branch of `handleFileItem`, added a `guard raw.count <= Self.kMaxRawDataBytes` check that returns early and logs a `print` diagnostic (consistent with the fork's existing `print`-based logging style) if the payload exceeds the cap.
+**Residual risk:** The `Data` object is loaded into memory before the size check. For very large payloads the memory allocation itself could be a concern, but `NSItemProvider.loadItem` applies its own limits in practice; this guard prevents the disk write.
+
 ## Dependency & License Review
 
 _(populated by Task C4)_
@@ -143,3 +154,4 @@ _(populated during C5 sign-off)_
 | 2026-04-21 | Entry-point enumeration (C2). | Relocat maintainers |
 | 2026-04-21 | FSI-90 fix: Android stream size cap (C3). | Relocat maintainers |
 | 2026-04-21 | FSI-91 fix: Android _display_name sanitization (C3). | Relocat maintainers |
+| 2026-04-21 | FSI-92 fix: iOS raw Data size cap (C3). | Relocat maintainers |

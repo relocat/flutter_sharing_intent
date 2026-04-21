@@ -70,6 +70,13 @@ open class FSIShareViewController: SLComposeServiceViewController {
     
     // Debug
     private let debugLogs = false
+
+    // MARK: - Security constants
+
+    /// Plugin-level cap for raw Data payloads delivered by share extensions (FSI-92).
+    /// Mirrors the Android plugin cap (16 MiB). Prevents a malicious source app from
+    /// exhausting the App Group container storage via an unbounded Data blob.
+    private static let kMaxRawDataBytes = 16 * 1024 * 1024
     
     // MARK: - Lifecycle
     open override func viewDidLoad() {
@@ -282,6 +289,12 @@ open class FSIShareViewController: SLComposeServiceViewController {
             }
         }
         else if let raw = data as? Data {
+            // SECURITY (FSI-92): Reject oversized raw Data payloads to prevent
+            // App Group container storage exhaustion by a malicious source app.
+            guard raw.count <= Self.kMaxRawDataBytes else {
+                print("[FSIShareVC] oversize Data payload rejected (\(raw.count) bytes > \(Self.kMaxRawDataBytes) limit)")
+                return
+            }
             let filename = "File_\(UUID().uuidString)"
             if let dst = containerURL()?.appendingPathComponent(filename) {
                 do {
