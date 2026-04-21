@@ -220,7 +220,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             if !self.sharedMedia.isEmpty {
                 self.saveAndRedirect()
             } else {
-                print("FSIShare: No shared media → stopping.")
+                self.log("No shared media → stopping.")
                 self.completeAndExit()
             }
         }
@@ -293,7 +293,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             // SECURITY (FSI-92): Reject oversized raw Data payloads to prevent
             // App Group container storage exhaustion by a malicious source app.
             guard raw.count <= Self.kMaxRawDataBytes else {
-                print("[FSIShareVC] oversize Data payload rejected (\(raw.count) bytes > \(Self.kMaxRawDataBytes) limit)")
+                self.log("oversize Data payload rejected (\(raw.count) bytes > \(Self.kMaxRawDataBytes) limit)")
                 return
             }
             let filename = "File_\(UUID().uuidString)"
@@ -570,9 +570,16 @@ class SharingFile: Codable {
         self.message = message
     }
     
-    // Debug method to print out SharedMediaFile details in the console
+    // Debug method to print out SharedMediaFile details in the console.
+    //
+    // Body wrapped in #if DEBUG so production builds cannot leak
+    // user-supplied filenames, MIME types, or thumbnail paths to the
+    // system log via this helper. Preserves the API for development
+    // use. Addresses R-SI-03 (see SECURITY_AUDIT.md).
     func toString() {
+        #if DEBUG
         print("[SharingFile] \n\tvalue: \(self.value)\n\tthumbnail: \(self.thumbnail ?? "--" )\n\tduration: \(self.duration ?? 0)\n\ttype: \(self.type)\n\tmimeType: \(String(describing: self.mimeType))\n\tmessage: \(String(describing: self.message))")
+        #endif
     }
 }
 
