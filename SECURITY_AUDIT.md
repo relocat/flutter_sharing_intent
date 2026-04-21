@@ -28,6 +28,7 @@ Updated as findings are filed. Severity: Critical / High / Medium / Low / Info.
 | Finding ID | Severity | Title | Status | Fix commit |
 |---|---|---|---|---|
 | FSI-90 | High | Android: no size cap on ContentResolver stream (DoS) | Fixed | TBD |
+| FSI-91 | High | Android: path traversal via _display_name (Tampering) | Fixed | TBD |
 
 ## Entry Points
 
@@ -111,6 +112,16 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Fix summary:** Introduced `MAX_STREAM_BYTES = 16 MiB` constant on `MyFileDirectory`. Replaced `copyTo` with a manual read loop that accumulates `totalWritten`; if the cap is exceeded the partial cache file is deleted and an `IOException` is thrown with a clear plugin-attributed message. `IOException` import added.
 **Residual risk:** Host apps that legitimately need files > 16 MiB must provide their own override at the service layer (the host app enforces its own, larger limit). The plugin cap is intentionally conservative.
 
+### FSI-91: Android — path traversal via _display_name (Tampering)
+
+**Severity:** High
+**Affected file:** `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` lines 117–119 (pre-fix)
+**STRIDE category:** Tampering
+**Reproduction sketch:** A malicious ContentProvider returns a `_display_name` value such as `../../malicious` or `/etc/passwd`. The raw value was fed directly to `File(context.cacheDir, fileName)`. On Android, `java.io.File` does not resolve the path against the base — it concatenates the string, so a name containing `/` would produce a path outside `cacheDir`, and `..` sequences could escape the intended subdirectory.
+**Impact:** An attacker-controlled source app could cause the plugin to write received file content to an attacker-chosen path within the app's sandbox, potentially overwriting existing cache files or data files accessible to the app.
+**Fix summary:** Added `sanitizeDisplayName(raw: String?): String` helper (marked `internal` for testability). The helper: (1) strips any path-prefix component before the last `/` or `\`; (2) rejects `.` and `..` as "unnamed"; (3) strips C0 control characters and NUL; (4) caps the result at 255 UTF-8 bytes; (5) falls back to "unnamed" for null/blank/empty inputs. `getDataColumn` now passes the raw cursor value through `sanitizeDisplayName` before constructing the `File` object.
+**Residual risk:** Unicode homoglyphs in filenames are not normalized — this is acceptable as they do not affect filesystem path resolution on Android.
+
 ## Dependency & License Review
 
 _(populated by Task C4)_
@@ -131,3 +142,4 @@ _(populated during C5 sign-off)_
 | 2026-04-21 | Initial scaffold (C1). | Relocat maintainers |
 | 2026-04-21 | Entry-point enumeration (C2). | Relocat maintainers |
 | 2026-04-21 | FSI-90 fix: Android stream size cap (C3). | Relocat maintainers |
+| 2026-04-21 | FSI-91 fix: Android _display_name sanitization (C3). | Relocat maintainers |

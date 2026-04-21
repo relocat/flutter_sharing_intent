@@ -34,6 +34,12 @@ object MyFileDirectory {
     private const val MAX_STREAM_BYTES: Long = 16L * 1024L * 1024L // 16 MiB
 
     /**
+     * Maximum byte length of a cache filename derived from _display_name (FSI-91).
+     * Matches the POSIX NAME_MAX limit for most Linux/Android filesystems.
+     */
+    private const val MAX_DISPLAY_NAME_BYTES: Int = 255
+
+    /**
      * Get a file path from a Uri. This will get the the path for Storage Access
      * Framework Documents, as well as the _data field for the MediaStore and
      * other file-based ContentProviders.
@@ -124,8 +130,11 @@ object MyFileDirectory {
                 cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, null)
                 if (cursor != null && cursor.moveToFirst()) {
                     val columnIndex = cursor.getColumnIndexOrThrow(column)
-                    val fileName = cursor.getString(columnIndex)
-                    Log.i("FileDirectory", "File name: $fileName")
+                    val rawName = cursor.getString(columnIndex)
+                    // SECURITY (FSI-91): _display_name is provider-controlled. Sanitize
+                    // before using as a cache filename to prevent path traversal.
+                    val fileName = sanitizeDisplayName(rawName)
+                    Log.i("FileDirectory", "File name (sanitized): $fileName")
                     targetFile = File(context.cacheDir, fileName)
                 }
             } finally {
@@ -185,6 +194,49 @@ object MyFileDirectory {
         return null
     }
 
+    /**
+     * Sanitize a provider-supplied _display_name so it is safe to use as a
+     * cache-directory filename (FSI-91).
+     *
+     * Rules applied in order:
+     * 1. Take only the component after the last '/' or '\\' (strip any embedded
+     *    path prefix the provider might inject).
+     * 2. Reject the special names "." and ".."; replace with "unnamed".
+     * 3. Strip NUL bytes and C0 control characters (U+0000..U+001F).
+     * 4. Cap at MAX_DISPLAY_NAME_BYTES (255) bytes in UTF-8.
+     * 5. Fall back to "unnamed" for null, blank, or empty results.
+     *
+     * @param raw The raw _display_name string from the ContentResolver cursor.
+     * @return A safe, non-empty filename component with no path separators.
+     */
+    internal fun sanitizeDisplayName(raw: String?): String {
+        if (raw.isNullOrBlank()) return "unnamed"
+
+        // Step 1: strip any path prefix (provider may inject slashes)
+        val lastSlash = raw.lastIndexOfAny(charArrayOf('/', '\\'))
+        val component = if (lastSlash >= 0) raw.substring(lastSlash + 1) else raw
+
+        // Step 2: reject dot-only special names
+        if (component == "." || component == "..") return "unnamed"
+
+        // Step 3: strip NUL and C0 control characters (codepoint < 0x20)
+        val stripped = component.filter { ch -> ch.code >= 0x20 }
+
+        if (stripped.isBlank()) return "unnamed"
+
+        // Step 4: cap at 255 UTF-8 bytes
+        val bytes = stripped.toByteArray(Charsets.UTF_8)
+        val safe: String = if (bytes.size <= MAX_DISPLAY_NAME_BYTES) {
+            stripped
+        } else {
+            // Truncate at a character boundary within the byte limit
+            String(bytes, 0, MAX_DISPLAY_NAME_BYTES, Charsets.UTF_8)
+        }
+
+        // Final guard: ensure truncation didn't produce a blank or dot name
+        if (safe.isBlank() || safe == "." || safe == "..") return "unnamed"
+        return safe
+    }
 
     /**
      * @param uri The Uri to check.
