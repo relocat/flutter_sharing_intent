@@ -31,6 +31,7 @@ Updated as findings are filed. Severity: Critical / High / Medium / Low / Info.
 | FSI-91 | High | Android: path traversal via _display_name (Tampering) | Fixed | TBD |
 | FSI-92 | High | iOS: no size cap on raw Data payload in handleFileItem (DoS) | Fixed | TBD |
 | FSI-93 | High | iOS: path traversal via url.lastPathComponent (Tampering) | Fixed | TBD |
+| FSI-94 | Medium | Dart: out-of-range SharedMediaType index crashes isolate (DoS) | Fixed | TBD |
 
 ## Entry Points
 
@@ -144,6 +145,16 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Fix summary:** Added `private func sanitizedComponent(_ raw: String) -> String` helper that: (1) returns "unnamed" for `.` and `..`; (2) strips `/` characters using `filter`; (3) caps at 255 UTF-8 bytes with proper Unicode scalar boundary truncation; (4) returns "unnamed" for blank/empty results. `getFileName(from:type:)` now passes `url.lastPathComponent` through `sanitizedComponent` before returning. All three call sites (`handleImageItem`, `handleVideoItem`, `handleFileItem`) inherit the fix via `getFileName`.
 **Residual risk:** The thumbnail path in `getThumbnailPath(for:)` uses `Data(url.lastPathComponent.utf8).base64EncodedString()` — base64 encoding the raw component makes it safe already; no fix needed there.
 
+### FSI-94: Dart — out-of-range SharedMediaType index crashes isolate (DoS)
+
+**Severity:** Medium
+**Affected file:** `lib/model/sharing_file.dart` line 37 (pre-fix)
+**STRIDE category:** Denial of Service
+**Reproduction sketch:** The EventChannel or MethodChannel payload is a JSON blob whose `type` field is an integer outside the range `[0, SharedMediaType.values.length - 1]` (e.g., `7` when the enum has 7 values). `SharedMediaType.values[json['type']]` throws an uncaught `RangeError` at the point of `SharedFile.fromJson`. Because this runs in a `StreamTransformer` on the EventChannel, the exception propagates and crashes the Dart isolate, effectively killing the share-intake pipeline.
+**Impact:** Crash of the share-intake Dart isolate when processing an attacker-supplied intent payload; denial of service for the share-intake feature.
+**Fix summary:** Replaced direct indexing with a top-level `_typeFromJson(Object? raw)` helper. The helper checks `raw is int`, bounds-checks the index against `SharedMediaType.values.length`, and returns `SharedMediaType.FILE` as a conservative fallback for any out-of-range or non-integer value. Added `test/sharing_file_test.dart` covering valid indices, out-of-range positive and negative indices, non-integer type, null, and missing key.
+**Residual risk:** None. The fix is exhaustive for all integer and non-integer inputs.
+
 ## Dependency & License Review
 
 _(populated by Task C4)_
@@ -167,3 +178,4 @@ _(populated during C5 sign-off)_
 | 2026-04-21 | FSI-91 fix: Android _display_name sanitization (C3). | Relocat maintainers |
 | 2026-04-21 | FSI-92 fix: iOS raw Data size cap (C3). | Relocat maintainers |
 | 2026-04-21 | FSI-93 fix: iOS filename sanitization (C3). | Relocat maintainers |
+| 2026-04-21 | FSI-94 fix: Dart SharedMediaType bounds check (C3). | Relocat maintainers |
