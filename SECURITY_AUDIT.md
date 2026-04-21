@@ -157,7 +157,70 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 
 ## Dependency & License Review
 
-_(populated by Task C4)_
+Completed 2026-04-21 (after the C3 fixes).
+
+### Dart
+
+| Package | Declared | Locked | Pinned? | Notes |
+|---|---|---|---|---|
+| `plugin_platform_interface` | `^2.1.8` | `2.1.8` | No (`^`) | Floating minor; latest is 2.1.8 — current, but range allows future auto-upgrade. Low risk for a stable interface package. |
+| `flutter` (SDK) | SDK | `0.0.0` | N/A | SDK dep; version governed by Flutter SDK itself. |
+| `flutter_test` (dev) | SDK | `0.0.0` | N/A | SDK dep; dev only. |
+| `flutter_lints` (dev) | `^6.0.0` | `6.0.0` | No (`^`) | Dev-only; floating minor. No security impact. |
+
+**Dart SDK constraint:** `>=3.1.2 <4.0.0`
+
+**Transitive deps (from pubspec.lock):** `async 2.13.1`, `collection 1.19.1`, `meta 1.17.0`, `path 1.9.1`, `vector_math 2.2.0` — all are well-maintained core Dart/Flutter packages. No known advisories as of 2026-04-21. Verify during CI with `dart pub audit` or OSV scanner on each release.
+
+**Finding DEP-01 (Low):** `plugin_platform_interface` declared with `^2.1.8` (caret — floating minor). Should be pinned to exact version for a vendored fork. No security advisory outstanding; purely a supply-chain hygiene concern.
+
+### Android
+
+- **Gradle wrapper:** not present in this plugin repository (plugin-only library; wrapper is supplied by host app build system). No `gradle-wrapper.properties` found.
+- **Android Gradle Plugin (AGP):** `7.3.0` (declared in `buildscript.dependencies`)
+- **Kotlin:** `2.1.20` (declared in `ext.kotlin_version`)
+- **compileSdk:** `36`
+- **minSdk:** `21`
+- **targetSdk:** not set at plugin level (library plugin; host app sets targetSdk — correct pattern for Android library modules)
+- **Repositories:** `google()` and `mavenCentral()` only. No `jcenter()`. PASS.
+- **Runtime dependencies:** none (`dependencies {}` block is empty).
+
+**Play Store floor:** targetSdk is host-app responsibility; plugin does not declare it. PASS for plugin scope.
+
+**Finding DEP-02 (Low):** AGP `7.3.0` is significantly outdated (released 2022-Q4; current stable is 8.x). While this is a library plugin (the host app's AGP ultimately governs the build), an outdated buildscript AGP can cause compatibility warnings and may not receive security patches for build-tooling vulnerabilities. Recommend bumping to AGP `8.7.x` or latest stable.
+
+### iOS
+
+- **Deployment target:** `12.0` (`s.platform = :ios, '12.0'`)
+- **Pod dependencies:** `Flutter` only (no third-party pods)
+- **Podspec license:** `{ :file => '../LICENSE' }` — correctly references upstream Apache-2.0 LICENSE file. PASS.
+- **Swift version:** `5.0`
+
+**Finding DEP-03 (Low):** iOS deployment target `12.0`. iOS 12 reached end of security updates in 2023 and represents a negligible real-world install base (< 1%). Recommend raising to `13.0` minimum. iOS 13 is required by Flutter 3.22+ in practice; keeping `12.0` in the podspec is misleading.
+
+### License
+
+- **Upstream:** Apache-2.0 (as declared in `LICENSE`, confirmed full text present)
+- **Fork license (`LICENSE.relocat`):** Apache-2.0 retained for fork modifications; `LICENSE.relocat` is a vendored-fork notice, not a separate license — it explicitly states all modifications retain Apache-2.0 and confirms compatibility with the AGPL-3.0-or-later Relocat consumer.
+- **Compatibility verdict:** Compatible. Apache-2.0 is a permissive license that explicitly permits inclusion in AGPL-3.0 works. No GPL-2-only conflict exists.
+- **Divergence document (`README.relocat.md`):** Honest. Documents fork purpose, base commit (`aa1672f`), all FSI fixes, host integration pattern, and maintenance policy. PASS.
+
+### SPDX headers
+
+All 8 Relocat-modified source files (4 Dart, 2 Kotlin, 2 Swift) were missing `SPDX-License-Identifier` headers. The upstream base commit (`aa1672f`) did not include SPDX annotations; Relocat added modifications across 12 commits without inserting headers.
+
+Fixed in commit `a80d489`: `// SPDX-License-Identifier: Apache-2.0` prepended to all 8 files.
+
+Post-fix: 0 Relocat-modified files missing SPDX. Unmodified upstream files (none in scope — all source files were touched post-fork) inherit upstream `LICENSE` implicitly.
+
+### Findings
+
+| ID | Severity | Title | Status |
+|---|---|---|---|
+| DEP-01 | Low | `plugin_platform_interface` declared with floating `^` range in pubspec.yaml | Open — cosmetic; pin on next dependency update cycle |
+| DEP-02 | Low | Android Gradle Plugin pinned at `7.3.0` (2022-era; current is 8.x) | Open — no active CVE; bump recommended before next Play Store submission |
+| DEP-03 | Low | iOS podspec deployment target `12.0` (iOS 12 EOL; misleading for Flutter 3.22+) | Open — raise to `13.0` on next podspec update |
+| SPDX-01 | Low | All 8 Relocat-modified source files missing SPDX-License-Identifier | Fixed — commit `a80d489` |
 
 ## Accepted Residual Risks
 
@@ -215,3 +278,5 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 | 2026-04-21 | FSI-93 fix: iOS filename sanitization (C3). | Relocat maintainers |
 | 2026-04-21 | FSI-94 fix: Dart SharedMediaType bounds check (C3). | Relocat maintainers |
 | 2026-04-21 | C3 close: residual risks + SHA backfill. | Relocat maintainers |
+| 2026-04-21 | SPDX headers added to all 8 Relocat-modified source files (C4). | Relocat maintainers |
+| 2026-04-21 | Dependency & license review complete (C4). | Relocat maintainers |
