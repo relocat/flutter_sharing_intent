@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import 'package:flutter_sharing_intent/model/sharing_file.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 

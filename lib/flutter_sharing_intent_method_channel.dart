@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
