@@ -4,7 +4,7 @@
 **Auditor:** Relocat maintainers
 **Scope:** everything under this repository except `example/` and `build/`.
 **Methodology:** STRIDE-lite per-entry-point + remediation-commit review + dependency & license audit.
-**Status:** Draft — findings populated as the audit progresses.
+**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94), 5 residual risks accepted, 3 low-severity dependency items deferred with rationale.
 
 Task labels C1-C4 in the revision history are the audit's own work phases:
 C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence review.
