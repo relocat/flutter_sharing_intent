@@ -12,6 +12,7 @@ import android.util.Log
 import android.webkit.MimeTypeMap
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.util.*
 
 /**
@@ -22,6 +23,15 @@ import java.util.*
  */
 
 object MyFileDirectory {
+
+    /**
+     * Plugin-level size cap for content streamed via ContentResolver.
+     * A malicious source app can offer an unbounded stream; this cap ensures
+     * we abort and clean up rather than fill the host app's cacheDir (FSI-90).
+     * Host apps that legitimately need a higher cap should override at the
+     * service layer (the host app enforces its own, larger limit; 16 MiB here is the plugin floor).
+     */
+    private const val MAX_STREAM_BYTES: Long = 16L * 1024L * 1024L // 16 MiB
 
     /**
      * Get a file path from a Uri. This will get the the path for Storage Access
@@ -135,9 +145,25 @@ object MyFileDirectory {
                 targetFile = File(context.cacheDir, "${prefix}_${Date().time}.$type")
             }
 
+            // SECURITY (FSI-90): Enforce a 16 MiB cap on content streamed from
+            // a provider-controlled URI. Abort and delete the partial file if
+            // the source exceeds the cap.
             context.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(targetFile).use { fileOut ->
-                    input.copyTo(fileOut)
+                    val buffer = ByteArray(8192)
+                    var totalWritten: Long = 0
+                    var read: Int
+                    while (input.read(buffer).also { read = it } != -1) {
+                        totalWritten += read
+                        if (totalWritten > MAX_STREAM_BYTES) {
+                            fileOut.close()
+                            targetFile!!.delete()
+                            throw IOException(
+                                "flutter_sharing_intent: source exceeds ${MAX_STREAM_BYTES / (1024 * 1024)} MiB plugin cap"
+                            )
+                        }
+                        fileOut.write(buffer, 0, read)
+                    }
                 }
             }
             return targetFile.path

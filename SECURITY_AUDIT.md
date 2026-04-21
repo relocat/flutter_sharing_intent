@@ -27,7 +27,7 @@ Updated as findings are filed. Severity: Critical / High / Medium / Low / Info.
 
 | Finding ID | Severity | Title | Status | Fix commit |
 |---|---|---|---|---|
-| _(populated during C3 / C4)_ | | | | |
+| FSI-90 | High | Android: no size cap on ContentResolver stream (DoS) | Fixed | TBD |
 
 ## Entry Points
 
@@ -101,7 +101,15 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 
 ## Findings
 
-_(populated per finding during C3; each finding's detail section lands in the same commit as its fix)_
+### FSI-90: Android — no size cap on ContentResolver.openInputStream (DoS)
+
+**Severity:** High
+**Affected file:** `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` lines 138–143 (pre-fix)
+**STRIDE category:** Tampering + Denial of Service
+**Reproduction sketch:** A malicious source app advertises a `content://` URI whose backing provider streams an unbounded byte sequence. `getDataColumn` opened this stream and called `InputStream.copyTo(FileOutputStream)` with no size limit, writing the full provider output into `context.cacheDir`. An attacker can exhaust cacheDir storage, causing `FileOutputStream` failures that crash subsequent operations or fill the device partition.
+**Impact:** Host app cacheDir storage exhaustion; denial-of-service for any feature relying on cache space; potential `OutOfMemoryError` for very large streams buffered in memory.
+**Fix summary:** Introduced `MAX_STREAM_BYTES = 16 MiB` constant on `MyFileDirectory`. Replaced `copyTo` with a manual read loop that accumulates `totalWritten`; if the cap is exceeded the partial cache file is deleted and an `IOException` is thrown with a clear plugin-attributed message. `IOException` import added.
+**Residual risk:** Host apps that legitimately need files > 16 MiB must provide their own override at the service layer (the host app enforces its own, larger limit). The plugin cap is intentionally conservative.
 
 ## Dependency & License Review
 
@@ -122,3 +130,4 @@ _(populated during C5 sign-off)_
 |---|---|---|
 | 2026-04-21 | Initial scaffold (C1). | Relocat maintainers |
 | 2026-04-21 | Entry-point enumeration (C2). | Relocat maintainers |
+| 2026-04-21 | FSI-90 fix: Android stream size cap (C3). | Relocat maintainers |
