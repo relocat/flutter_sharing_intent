@@ -129,6 +129,11 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
             /// Clear cache data to send only once
             self.initialSharing = nil
             self.latestSharing = nil
+            // FSI-95: the persisted App Group metadata plist is already cleared
+            // by handleUrl the moment it lifts the payload into memory (the only
+            // path that populates these caches), so there is nothing to clear
+            // here. Clearing unconditionally here would risk wiping a concurrent
+            // second share's metadata before its own handleUrl runs.
 
         case "reset":
             self.initialSharing = nil
@@ -153,13 +158,40 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         }
     }
 
-    /// Resolves the App Group container URL using the same precedence as
-    /// the share extension: the `AppGroupId` Info.plist key if set, otherwise
-    /// the conventional `group.<host-bundle-id>` identifier.
-    private func appGroupContainerURL() -> URL? {
+    /// Removes the App Group UserDefaults entries that carry share metadata
+    /// (staged-file paths, MIME types, and the share message text), so the
+    /// OS-default-protection-class plist does not linger on disk readable from
+    /// a locked device after first unlock (FSI-95).
+    ///
+    /// Called from `handleUrl` once the host app has lifted a payload into
+    /// memory. `consumed` is the exact payload blob that was just read: the
+    /// keys are removed ONLY while the persisted blob still equals it, so a
+    /// second share written by a concurrent extension run between our read and
+    /// this clear is never wiped before its own `handleUrl` consumes it
+    /// (cross-process compare-and-clear; the residual TOCTOU is sub-millisecond
+    /// and iOS serialises share-sheet invocations). `synchronize()` forces the
+    /// cross-process App Group plist flush so the removal is durable even if the
+    /// host is killed immediately afterwards.
+    private func clearPersistedShareMetadata(consumed: Data) {
+        guard let ud = UserDefaults(suiteName: resolvedAppGroupId()) else { return }
+        guard let current = ud.object(forKey: kUserDefaultsKey) as? Data,
+              current == consumed else { return }
+        ud.removeObject(forKey: kUserDefaultsKey)
+        ud.removeObject(forKey: kUserDefaultsMessageKey)
+        ud.synchronize()
+    }
+
+    /// Resolves the App Group identifier with the same precedence as the share
+    /// extension: the `AppGroupId` Info.plist key if set, otherwise the
+    /// conventional `group.<host-bundle-id>` identifier.
+    private func resolvedAppGroupId() -> String {
         let custom = Bundle.main.object(forInfoDictionaryKey: kAppGroupIdKey) as? String
-        let appGroupId = custom ?? "group.\(Bundle.main.bundleIdentifier ?? "")"
-        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)
+        return custom ?? "group.\(Bundle.main.bundleIdentifier ?? "")"
+    }
+
+    /// Resolves the App Group container URL from `resolvedAppGroupId`.
+    private func appGroupContainerURL() -> URL? {
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: resolvedAppGroupId())
     }
 
     /// Deletes shared-file copies from the App Group container after the host
@@ -180,13 +212,23 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
             // which could otherwise trick the plugin into deleting arbitrary
             // files the host app has read access to.
             guard p.hasPrefix(containerPath) else {
+                // Path intentionally omitted from the release log: it carries
+                // App Group container / share-filename metadata (zero-knowledge).
+                #if DEBUG
                 NSLog("[FSI] cleanup: refusing to delete outside container: \(p)")
+                #else
+                NSLog("[FSI] cleanup: refusing to delete path outside container")
+                #endif
                 continue
             }
             do {
                 try fm.removeItem(atPath: p)
             } catch {
+                #if DEBUG
                 NSLog("[FSI] cleanup failed for \(p): \(error.localizedDescription)")
+                #else
+                NSLog("[FSI] cleanup failed for a container file")
+                #endif
             }
         }
     }
@@ -261,6 +303,26 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
 
            let message = userDefaults?.string(forKey: kUserDefaultsMessageKey)
            if let json = userDefaults?.object(forKey: kUserDefaultsKey) as? Data {
+               // FSI-95: the App Group UserDefaults plist that carries share
+               // metadata (staged-file paths, MIME types, message text) inherits
+               // the OS-default CompleteUntilFirstUserAuthentication protection
+               // class, so it stays readable from a locked device after first
+               // unlock. The previous `reset`/`getInitialSharing` path cleared
+               // only the in-memory caches, leaving this plist on disk until the
+               // next share overwrote it. We have lifted the payload into the
+               // `json` value, so the persisted copy must be removed (collapsing
+               // the on-disk metadata window from "until the next share" to the
+               // share-handoff interval, during which the device is necessarily
+               // unlocked). The file contents are already written with
+               // .completeFileProtection by the share extension.
+               //
+               // The clear is deferred to AFTER the decode attempt below (in both
+               // the success and the decode-failure branch) so the persisted blob
+               // is never removed before we have committed to consuming it; `json`
+               // is an in-memory snapshot, so decode is unaffected by the clear.
+               // `clearPersistedShareMetadata` compares against the exact blob we
+               // read, so a concurrently-written second share is never wiped
+               // before its own `handleUrl` consumes it.
                let sharedArray: [SharingFile]
                do {
                    sharedArray = try decode(data: json)
@@ -270,6 +332,10 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                    // returning an empty list, which is indistinguishable from
                    // "no shares received" and hides lateral-movement tampering.
                    NSLog("[FSI] decode failed: \(error.localizedDescription)")
+                   // A deterministic decode failure means the blob is permanently
+                   // un-decodable, so wipe it too rather than leave tampered
+                   // plaintext lingering on disk (FSI-95).
+                   clearPersistedShareMetadata(consumed: json)
                    let err = FlutterError(
                        code: "DECODE_FAILED",
                        message: "Failed to decode shared payload",
@@ -278,6 +344,7 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                    eventSinkMedia?(err)
                    return true
                }
+               clearPersistedShareMetadata(consumed: json)
                // CONCURRENCY (FSI-72): PHAsset resolution may take seconds on
                // iCloud downloads (isNetworkAccessAllowed = true). Resolving
                // asynchronously prevents main-thread stalls that can trigger
