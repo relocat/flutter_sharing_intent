@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by Relocat (2026); see NOTICE.
 import 'package:flutter_sharing_intent/model/sharing_file.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 

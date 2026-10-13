@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by Relocat (2026); see NOTICE.
 // FSIShareViewController.swift
 // Merged, optimized controller: uses RSI architecture with all FSI features preserved
 // Uses model name `SharingFile` (same fields as SharedMediaFile) where `value` = path

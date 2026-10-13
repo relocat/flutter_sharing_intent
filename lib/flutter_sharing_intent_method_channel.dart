@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by Relocat (2026); see NOTICE.
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';

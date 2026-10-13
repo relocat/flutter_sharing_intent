@@ -1,0 +1,20 @@
+flutter_sharing_intent — Relocat fork
+Copyright the flutter_sharing_intent authors (https://github.com/TSPL-Bhagat/flutter_sharing_intent).
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This fork is maintained by Relocat <office@relocat.org> at
+https://github.com/relocat/flutter_sharing_intent. It is based on upstream commit
+aa1672f547d6579585fa27df0b28ffa2a2544aaa (v2.0.4). Relocat modified the following files in 2026;
+the modifications are licensed under Apache-2.0:
+  android/build.gradle
+  android/src/main/kotlin/com/techind/flutter_sharing_intent/FlutterSharingIntentPlugin.kt
+  android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt
+  ios/Classes/FSIShareViewController.swift
+  ios/Classes/SwiftFlutterSharingIntentPlugin.swift
+  lib/flutter_sharing_intent.dart
+  lib/flutter_sharing_intent_method_channel.dart
+  lib/flutter_sharing_intent_platform_interface.dart
+  lib/model/sharing_file.dart
+  test/flutter_sharing_intent_test.dart
+  test/sharing_file_test.dart (new)
+See the git history for details.

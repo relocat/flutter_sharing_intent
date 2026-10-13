@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by Relocat (2026); see NOTICE.
 import Flutter
 import Photos
 import UIKit
@@ -37,7 +38,7 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
     // forwarders are safe no-ops — the host SceneDelegate can be wired
     // unconditionally without crashing.
     //
-    // See README.relocat.md for the SceneDelegate boilerplate hosts must
+    // See README.md (fork notice) for the SceneDelegate boilerplate hosts must
     // install.
     public static var sharedInstance: SwiftFlutterSharingIntentPlugin?
 

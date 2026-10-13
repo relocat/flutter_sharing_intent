@@ -1,3 +1,78 @@
+> [!NOTE]
+> **This is Relocat's fork of [flutter_sharing_intent](https://github.com/TSPL-Bhagat/flutter_sharing_intent)**
+> by Bhagat Singh / techind.co and contributors ([pub.dev](https://pub.dev/packages/flutter_sharing_intent)).
+> It is based on upstream v2.0.4 (`aa1672f547d6579585fa27df0b28ffa2a2544aaa`). It does not yet include
+> later upstream changes.
+>
+> **Why it exists.** The [Relocat](https://relocat.org) app receives shared files straight into an
+> encrypted vault, so share intake has to treat everything the sending app supplies as untrusted
+> input. We reviewed the plugin (see [SECURITY_AUDIT.md](SECURITY_AUDIT.md)) and fixed what we found.
+>
+> **What this fork changes:**
+> - **Android:**
+>   - rejects non-`content://` URIs;
+>   - caps each streamed file at 16 MiB;
+>   - sanitises the provider-supplied `_display_name`, which blocks path traversal;
+>   - handles intents off the main thread;
+>   - prunes video thumbnails older than 7 days;
+>   - removes the unused appcompat, material and constraintlayout dependencies.
+> - **iOS:**
+>   - bridges the UIScene lifecycle, so scene-based apps (the Flutter 3.11+ default) receive shares;
+>   - resolves photos off the main thread;
+>   - surfaces decode errors as `DECODE_FAILED` instead of returning an empty list;
+>   - caps raw `Data` payloads at 16 MiB;
+>   - sanitises `lastPathComponent`;
+>   - stops release builds from logging file names or paths;
+>   - clears the App Group share-metadata plist as soon as the app reads it.
+> - **Dart / all platforms:**
+>   - new `cleanup(List<String> paths)` deletes the iOS App Group copies after use; it is a no-op
+>     on Android;
+>   - out-of-range media-type values no longer crash decoding.
+>
+> **Licence.** Apache-2.0, unchanged from upstream (see [LICENSE](LICENSE)). Our modifications are
+> released under the same licence; modified files are marked, and [NOTICE](NOTICE) lists them.
+>
+> Relocat is **not affiliated with or endorsed by** the flutter_sharing_intent maintainers.
+>
+> **Use the upstream package unless you need these changes.** This fork is not published to pub.dev;
+> depend on it by git URL pinned to a commit.
+>
+> **Issues.** Problems with the changes above belong
+> [here](https://github.com/relocat/flutter_sharing_intent/issues). Everything else belongs
+> [upstream](https://github.com/TSPL-Bhagat/flutter_sharing_intent/issues). Report security
+> issues privately to office@relocat.org.
+>
+> #### Fork-only API: iOS scene-based apps
+> Scene-based apps must forward their `UISceneDelegate` callbacks to the plugin:
+> ```swift
+> import UIKit
+> import flutter_sharing_intent
+>
+> class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+>     func scene(_ scene: UIScene,
+>                willConnectTo session: UISceneSession,
+>                options connectionOptions: UIScene.ConnectionOptions) {
+>         SwiftFlutterSharingIntentPlugin.handleSceneURLContexts(
+>             connectionOptions.urlContexts)
+>         if let activity = connectionOptions.userActivities.first {
+>             SwiftFlutterSharingIntentPlugin.handleSceneUserActivity(activity)
+>         }
+>     }
+>
+>     func scene(_ scene: UIScene,
+>                openURLContexts URLContexts: Set<UIOpenURLContext>) {
+>         SwiftFlutterSharingIntentPlugin.handleSceneURLContexts(URLContexts)
+>     }
+>
+>     func scene(_ scene: UIScene,
+>                continue userActivity: NSUserActivity) {
+>         SwiftFlutterSharingIntentPlugin.handleSceneUserActivity(userActivity)
+>     }
+> }
+> ```
+>
+> The existing AppDelegate callbacks are preserved for pre-scene hosts.
+
 # flutter_sharing_intent
 [![pub package](https://img.shields.io/pub/v/flutter_sharing_intent.svg)](https://pub.dev/packages/flutter_sharing_intent)
 

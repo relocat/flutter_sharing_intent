@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by Relocat (2026); see NOTICE.
 // ignore_for_file: constant_identifier_names
 
 class SharedFile {

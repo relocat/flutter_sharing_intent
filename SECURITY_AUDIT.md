@@ -11,9 +11,9 @@ C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence rev
 
 ## Upstream & Fork
 
-- **Upstream:** https://github.com/bhagat-techind/flutter_sharing_intent
+- **Upstream:** https://github.com/TSPL-Bhagat/flutter_sharing_intent
 - **Upstream license:** Apache-2.0
-- **Fork purpose:** Relocat vendors this plugin because upstream release cadence is slow and several iOS/Android issues affect Relocat directly. Divergence rationale lives in `README.relocat.md`.
+- **Fork purpose:** Relocat vendors this plugin because upstream release cadence is slow and several iOS/Android issues affect Relocat directly. Divergence rationale lives in the fork notice at the top of `README.md`.
 - **Earlier fork fixes** (made before this audit):
   - FSI-24 — Android: intent handling moved off main thread.
   - FSI-31 — Android/iOS/Dart: cleanup API for App Group files.
@@ -201,9 +201,9 @@ Completed 2026-04-21 (after the C3 fixes).
 ### License
 
 - **Upstream:** Apache-2.0 (as declared in `LICENSE`, confirmed full text present)
-- **Fork license (`LICENSE.relocat`):** Apache-2.0 retained for fork modifications; `LICENSE.relocat` is a vendored-fork notice, not a separate license — it explicitly states all modifications retain Apache-2.0 and confirms compatibility with the AGPL-3.0-or-later Relocat consumer.
+- **Fork license (`NOTICE`):** Apache-2.0 retained for fork modifications; `NOTICE` is a fork notice, not a separate license. It states that all modifications retain Apache-2.0 and lists the modified files.
 - **Compatibility verdict:** Compatible. Apache-2.0 is a permissive license that explicitly permits inclusion in AGPL-3.0 works. No GPL-2-only conflict exists.
-- **Divergence document (`README.relocat.md`):** Honest. Documents fork purpose, base commit (`aa1672f`), all FSI fixes, host integration pattern, and maintenance policy. PASS.
+- **Divergence document (fork notice in `README.md`):** Documents fork purpose, base commit (`aa1672f`), the FSI fixes and the host integration pattern. PASS.
 
 ### SPDX headers
 
@@ -244,6 +244,7 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 
 **File:** `ios/Classes/FSIShareViewController.swift` (multiple lines)
 **Risk:** `print()` calls in the share extension can leak diagnostic information to the system log, visible to any app with the `com.apple.syslog.read` entitlement or to a connected debugger.
+**Status update:** Fixed in `b0d272b` (release builds no longer log file names or paths). The original deferral rationale follows.
 **Justification for deferral:** No key material, credentials, or PII is printed — only filenames, byte counts, and error labels. The existing `log()` helper already gates on `debugLogs = false`. The bare `print` calls are residual from the upstream fork. Tracked as a fork hygiene follow-up.
 **Owner:** fork hygiene follow-up.
 
@@ -263,8 +264,8 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 
 ## Related
 
-- Upstream: https://github.com/bhagat-techind/flutter_sharing_intent
-- Fork rationale & licensing: `README.relocat.md` and `LICENSE.relocat`
+- Upstream: https://github.com/TSPL-Bhagat/flutter_sharing_intent
+- Fork rationale & licensing: the fork notice in `README.md`, and `NOTICE`
 
 ## Revision History
 
@@ -280,3 +281,19 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 | 2026-04-21 | C3 close: residual risks + SHA backfill. | Relocat maintainers |
 | 2026-04-21 | SPDX headers added to all 8 Relocat-modified source files (C4). | Relocat maintainers |
 | 2026-04-21 | Dependency & license review complete (C4). | Relocat maintainers |
+
+## Addendum (2026-06-15): FSI-95, App Group share-metadata plist wipe
+
+| Finding ID | Severity | Title | Status | Fix commit |
+|---|---|---|---|---|
+| FSI-95 | Low | iOS: App Group share-metadata plist persisted after the app consumed it (information exposure at rest) | Fixed | `f01fef4` |
+
+The iOS share extension stores share metadata in the App Group `UserDefaults`, which is backed by a
+plist on disk. The plugin now wipes that plist as soon as the app reads it, so file names and paths
+of shared items no longer linger at rest. Found in a later native review round (2026-06-10), fixed 2026-06-15. The same commit also gates the
+path logging in `cleanupFiles` behind `#if DEBUG`.
+
+## Addendum (2026-04-21): R-SI-03 resolved
+
+R-SI-03 (unguarded `print()` calls in `FSIShareViewController`) is fixed in `b0d272b`: release builds
+no longer log file names or paths.

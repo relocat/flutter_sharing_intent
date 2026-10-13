@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Modified by Relocat (2026); see NOTICE.
 package com.techind.flutter_sharing_intent
 
 import android.content.ContentUris
