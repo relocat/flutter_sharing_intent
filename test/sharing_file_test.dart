@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Modified by Relocat (2026); see NOTICE.
 import 'package:flutter_sharing_intent/model/sharing_file.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -32,9 +33,8 @@ void main() {
       expect(f.type, SharedMediaType.FILE);
     });
 
-    test('non-int string type falls back to FILE via index 0 path', () {
-      // raw is a String, not int => typeIdx defaults to 0 => TEXT
-      // The task spec says fallback for non-int; index 0 is TEXT, not FILE.
+    test('non-int type falls back to TEXT (index 0)', () {
+      // raw is a String, not an int => typeIdx defaults to 0 => TEXT.
       // Verify it doesn't crash and returns the index-0 value (TEXT).
       final f = SharedFile.fromJson({'value': 'x', 'type': 'image'});
       expect(f.type, SharedMediaType.TEXT);

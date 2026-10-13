@@ -1,3 +1,4 @@
+# Modified by Relocat (2026); see NOTICE.
 name: flutter_sharing_intent
 description: A flutter plugin that allow flutter apps to receive photos, videos, text, urls or any other file types from another app.
 version: 2.0.4

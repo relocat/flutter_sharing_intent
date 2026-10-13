@@ -4,7 +4,7 @@
 **Auditor:** Relocat maintainers
 **Scope:** everything under this repository except `example/` and `build/`.
 **Methodology:** STRIDE-lite per-entry-point + remediation-commit review + dependency & license audit.
-**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94), 5 residual risks accepted, 3 low-severity dependency items deferred with rationale.
+**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale.
 
 Task labels C1-C4 in the revision history are the audit's own work phases:
 C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence review.
@@ -155,8 +155,8 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **STRIDE category:** Denial of Service
 **Reproduction sketch:** The EventChannel or MethodChannel payload is a JSON blob whose `type` field is an integer outside the range `[0, SharedMediaType.values.length - 1]` (e.g., `7` when the enum has 7 values). `SharedMediaType.values[json['type']]` throws an uncaught `RangeError` at the point of `SharedFile.fromJson`. Because this runs in a `StreamTransformer` on the EventChannel, the exception propagates and crashes the Dart isolate, effectively killing the share-intake pipeline.
 **Impact:** Crash of the share-intake Dart isolate when processing an attacker-supplied intent payload; denial of service for the share-intake feature.
-**Fix summary:** Replaced direct indexing with a top-level `_typeFromJson(Object? raw)` helper. The helper checks `raw is int`, bounds-checks the index against `SharedMediaType.values.length`, and returns `SharedMediaType.FILE` as a conservative fallback for any out-of-range or non-integer value. Added `test/sharing_file_test.dart` covering valid indices, out-of-range positive and negative indices, non-integer type, null, and missing key.
-**Residual risk:** None. The fix is exhaustive for all integer and non-integer inputs.
+**Fix summary:** Replaced direct indexing with a top-level `_typeFromJson(Object? raw)` helper. The helper checks `raw is int`, bounds-checks the index against `SharedMediaType.values.length`, and returns `SharedMediaType.FILE` as a conservative fallback for out-of-range integers. A non-integer, null or missing `type` falls back to index 0 (`SharedMediaType.TEXT`). Added `test/sharing_file_test.dart` covering valid indices, out-of-range positive and negative indices, non-integer type, null, and missing key.
+**Residual risk:** None known. Every integer and every non-integer input now yields a valid `SharedMediaType` instead of throwing; the unit tests cover each case.
 
 ## Dependency & License Review
 
@@ -173,7 +173,7 @@ Completed 2026-04-21 (after the C3 fixes).
 
 **Dart SDK constraint:** `>=3.1.2 <4.0.0`
 
-**Transitive deps (from pubspec.lock):** `async 2.13.1`, `collection 1.19.1`, `meta 1.17.0`, `path 1.9.1`, `vector_math 2.2.0` — all are well-maintained core Dart/Flutter packages. No known advisories as of 2026-04-21. Verify during CI with `dart pub audit` or OSV scanner on each release.
+**Transitive deps (from pubspec.lock):** `async 2.13.1`, `collection 1.19.1`, `meta 1.17.0`, `path 1.9.1`, `vector_math 2.2.0` — all are well-maintained core Dart/Flutter packages. No known advisories as of 2026-04-21. Check the dependencies against the OSV / GitHub advisory databases on each release, for example by running `osv-scanner` on `pubspec.lock`.
 
 **Finding DEP-01 (Low):** `plugin_platform_interface` declared with `^2.1.8` (caret — floating minor). Should be pinned to exact version for a vendored fork. No security advisory outstanding; purely a supply-chain hygiene concern.
 
@@ -205,7 +205,7 @@ Completed 2026-04-21 (after the C3 fixes).
 
 - **Upstream:** Apache-2.0 (as declared in `LICENSE`, confirmed full text present)
 - **Fork license (`NOTICE`):** Apache-2.0 retained for fork modifications; `NOTICE` is a fork notice, not a separate license. It states that all modifications retain Apache-2.0 and lists the modified files.
-- **Compatibility verdict:** Compatible. Apache-2.0 is a permissive license that explicitly permits inclusion in AGPL-3.0 works. No GPL-2-only conflict exists.
+- **Compatibility verdict:** Compatible. Apache-2.0 is compatible with inclusion in GPL-3.0 works (one-way, per the FSF's licence compatibility assessment), and the app that consumes this fork is licensed GPL-3.0-or-later. Apache-2.0 is not compatible with GPL-2.0-only, which does not apply here.
 - **Divergence document (fork notice in `README.md`):** Documents fork purpose, base commit (`aa1672f`), the FSI fixes and the host integration pattern. PASS.
 
 ### SPDX headers
@@ -214,7 +214,7 @@ All 8 Relocat-modified source files (4 Dart, 2 Kotlin, 2 Swift) were missing `SP
 
 Fixed in commit `a80d489`: `// SPDX-License-Identifier: Apache-2.0` prepended to all 8 files.
 
-Post-fix: 0 Relocat-modified files missing SPDX. Unmodified upstream files (none in scope — all source files were touched post-fork) inherit upstream `LICENSE` implicitly.
+Post-fix state of the current tree: every modified source file carries an `SPDX-License-Identifier: Apache-2.0` header and a "Modified by Relocat (2026); see NOTICE." line: the 8 files above, plus `android/build.gradle`, `test/flutter_sharing_intent_test.dart` and `test/sharing_file_test.dart`, which received them in a later commit. `pubspec.yaml` carries the modified-by comment and is listed in `NOTICE`. Files this fork did not modify (for example `ios/Classes/FlutterSharingIntentPlugin.h` and `.m`) are not annotated and fall under the repository `LICENSE`.
 
 ### Findings
 
@@ -223,7 +223,7 @@ Post-fix: 0 Relocat-modified files missing SPDX. Unmodified upstream files (none
 | DEP-01 | Low | `plugin_platform_interface` declared with floating `^` range in pubspec.yaml | Open — cosmetic; pin on next dependency update cycle |
 | DEP-02 | Low | Android Gradle Plugin pinned at `7.3.0` (2022-era; current is 8.x) | Open — no active CVE; bump recommended |
 | DEP-03 | Low | iOS podspec deployment target `12.0` (iOS 12 EOL; misleading for Flutter 3.22+) | Open — raise to `13.0` on next podspec update |
-| SPDX-01 | Low | All 8 Relocat-modified source files missing SPDX-License-Identifier | Fixed — commit `a80d489` |
+| SPDX-01 | Low | All 8 Relocat-modified source files missing SPDX-License-Identifier | Fixed — commit `a80d489` (the 8 files; three more modified files were annotated later) |
 
 ## Accepted Residual Risks
 
