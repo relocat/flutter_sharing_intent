@@ -478,35 +478,49 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// the App Group container (FSI-93).
     ///
     /// Rules applied in order:
-    /// 1. Reject "." and ".." and return "unnamed".
-    /// 2. Strip "/" path separator characters.
-    /// 3. Cap at 255 bytes in UTF-8 (POSIX NAME\_MAX).
-    /// 4. Fall back to "unnamed" for blank or empty results.
+    /// 1. Strip "/" path separators and control characters: NUL and the rest
+    ///    of C0 (U+0000-U+001F), DEL (U+007F) and C1 (U+0080-U+009F).
+    /// 2. Cap at 255 bytes in UTF-8 (POSIX NAME\_MAX), cutting only between
+    ///    whole Characters (extended grapheme clusters).
+    /// 3. Return "unnamed" for an empty or blank result, and for "." and "..".
     ///
     /// - Parameter raw: The raw string (typically `url.lastPathComponent`).
     /// - Returns: A safe, non-empty filename component.
     private func sanitizedComponent(_ raw: String) -> String {
-        // Step 1: reject dot-only special names
-        if raw == "." || raw == ".." { return "unnamed" }
+        let maxBytes = 255 // POSIX NAME_MAX
 
-        // Step 2: strip path separator characters (NUL is not representable
-        // in Swift String so no explicit NUL strip is needed)
-        let stripped = raw.filter { ch in ch != Character("/") }
-
-        if stripped.isEmpty { return "unnamed" }
-
-        // Step 3: cap at 255 UTF-8 bytes
-        let utf8Bytes = Array(stripped.utf8)
-        guard utf8Bytes.count > 255 else {
-            let safe = stripped
-            if safe == "." || safe == ".." { return "unnamed" }
-            return safe
+        // Step 1: a Swift String can contain U+0000, so NUL is stripped
+        // explicitly together with the other control characters. Filtering
+        // works on whole Unicode scalars and never splits one.
+        let keptScalars = raw.unicodeScalars.filter { scalar in
+            let v = scalar.value
+            if scalar == "/" { return false }
+            if v <= 0x1F { return false }              // NUL and C0
+            if v >= 0x7F && v <= 0x9F { return false } // DEL and C1
+            return true
         }
-        // Truncate at a Unicode scalar boundary within 255 bytes
-        var end = 255
-        while end > 0 && (utf8Bytes[end] & 0xC0) == 0x80 { end -= 1 }
-        let truncated = String(bytes: Array(utf8Bytes.prefix(end)), encoding: .utf8) ?? "unnamed"
-        if truncated.isEmpty || truncated == "." || truncated == ".." { return "unnamed" }
+        var stripped = ""
+        stripped.unicodeScalars.append(contentsOf: keptScalars)
+
+        // Step 2: keep whole Characters while they fit in maxBytes of UTF-8.
+        // The result is a prefix of valid Characters, so it is valid UTF-8,
+        // contains no U+FFFD and never separates a combining mark or an emoji
+        // sequence from the rest of its Character. A single Character longer
+        // than maxBytes yields an empty result, which step 3 replaces.
+        var truncated = ""
+        var usedBytes = 0
+        for character in stripped {
+            let size = character.utf8.count
+            if usedBytes + size > maxBytes { break }
+            truncated.append(character)
+            usedBytes += size
+        }
+
+        // Step 3: reject empty, blank and dot-only special names.
+        if truncated.trimmingCharacters(in: .whitespaces).isEmpty
+            || truncated == "." || truncated == ".." {
+            return "unnamed"
+        }
         return truncated
     }
 

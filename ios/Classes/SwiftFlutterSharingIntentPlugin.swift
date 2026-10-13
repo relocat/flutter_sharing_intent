@@ -20,13 +20,21 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
 
     // MARK: - UIScene bridging (FSI-81)
     //
-    // On iOS 13+ with scene-based hosts (Flutter 3.11+ default), external
-    // URL opens are delivered to `UISceneDelegate` callbacks
-    // (`scene(_:willConnectTo:options:)`, `scene(_:openURLContexts:)`,
-    // `scene(_:continue:)`), bypassing the `UIApplicationDelegate` callbacks
-    // that this plugin historically relied on. Flutter's iOS plugin
-    // registrar does not yet expose a scene-delegate hook, so we expose
-    // static forwarders that the host app's `SceneDelegate` can call.
+    // On iOS 13+, apps that use the UIScene lifecycle (the Flutter default
+    // since Flutter 3.41) receive external URL opens through
+    // `UISceneDelegate` callbacks (`scene(_:willConnectTo:options:)`,
+    // `scene(_:openURLContexts:)`, `scene(_:continue:)`) instead of the
+    // `UIApplicationDelegate` callbacks this plugin registers for.
+    //
+    // Flutter 3.38 added a plugin scene hook (`registrar.addSceneDelegate`
+    // with `FlutterSceneLifeCycleDelegate`). This plugin does not adopt it
+    // yet, because that API does not exist in the older Flutter SDKs the
+    // plugin still supports. Since 3.38, `FlutterSceneDelegate` passes scene
+    // URL and user-activity events on to plugins that registered only
+    // application-delegate callbacks, as this one does. For hosts where that
+    // does not happen (a SceneDelegate that does not subclass
+    // `FlutterSceneDelegate`, or an older Flutter SDK), we expose static
+    // forwarders that the host app's `SceneDelegate` can call.
     //
     // The `sharedInstance` reference is populated during `register(with:)`
     // so the host app can reach the live plugin instance from its own
@@ -66,8 +74,9 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
     ///
     /// Host apps with scene-based lifecycles must call this method from
     /// their SceneDelegate so that share-extension redirect URLs reach the
-    /// plugin on iOS 13+ (Flutter 3.11+ default). Without this forwarding,
-    /// cold-start share intake is silently broken.
+    /// plugin on iOS 13+ when Flutter does not pass the scene events on
+    /// itself (see the UIScene bridging section above). Without forwarding
+    /// in that case, share intake through the scene path is silently broken.
     ///
     /// SECURITY: the URL is passed through the same `hasSameSchemePrefix`
     /// gate used by the AppDelegate path (enforced inside `handleUrl`'s
@@ -197,22 +206,21 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
 
     /// Deletes shared-file copies from the App Group container after the host
     /// app has processed them (FSI-31). Best-effort: per-file errors are logged
-    /// and swallowed; the method never throws back to Dart. Only file paths
-    /// that are inside the configured App Group container are accepted —
-    /// refuses to delete outside the container as a defensive check.
+    /// and swallowed; the method never throws back to Dart. A path is deleted
+    /// only if `isStrictlyInsideContainer` accepts it; every other path is
+    /// refused.
     private func cleanupFiles(paths: [String]) {
         guard let groupUrl = self.appGroupContainerURL() else {
             NSLog("[FSI] cleanup: no App Group container URL available")
             return
         }
-        let containerPath = groupUrl.path
         let fm = FileManager.default
         for p in paths {
-            // SECURITY: only delete under our App Group container (FSI-31).
+            // SECURITY: only delete below our App Group container (FSI-31).
             // Defends against a caller passing paths outside the container,
             // which could otherwise trick the plugin into deleting arbitrary
-            // files the host app has read access to.
-            guard p.hasPrefix(containerPath) else {
+            // files the host app can write to.
+            guard Self.isStrictlyInsideContainer(path: p, containerURL: groupUrl) else {
                 // Path intentionally omitted from the release log: it carries
                 // App Group container / share-filename metadata (zero-knowledge).
                 #if DEBUG
@@ -234,6 +242,38 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         }
     }
     
+    /// Returns true only if `path` names an item strictly below `containerURL`
+    /// (FSI-31 cleanup guard). The check is lexical and fails closed:
+    ///
+    /// 1. An empty or relative path is rejected, because it cannot be anchored
+    ///    to the container.
+    /// 2. A path with any `..` component is rejected outright. The kernel
+    ///    resolves `..` after following symlinks, so a lexical clean-up of
+    ///    `<container>/link/../x` could name a different file from the one
+    ///    `removeItem` deletes. Paths this plugin hands to Dart never contain
+    ///    `..`, so rejecting them costs nothing.
+    /// 3. Both paths are standardised (`standardizedFileURL`: `.` segments,
+    ///    repeated and trailing slashes removed) and compared by path
+    ///    component, so a sibling such as `<container>-evil/x` does not match.
+    ///    The candidate must have more components than the container: the
+    ///    container itself is never accepted.
+    ///
+    /// Symlinks are not resolved, matching the rest of the plugin, which works
+    /// on the paths it wrote. `removeItem` deletes a symlink itself, not its
+    /// target, so a symlink as the last component cannot redirect a delete. A
+    /// symlinked directory inside the container could; only the host app and
+    /// its own share extension can write there.
+    static func isStrictlyInsideContainer(path: String, containerURL: URL) -> Bool {
+        guard !path.isEmpty, path.hasPrefix("/") else { return false }
+        let rawComponents = path.split(separator: "/", omittingEmptySubsequences: true)
+        guard !rawComponents.contains("..") else { return false }
+
+        let candidate = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        let container = containerURL.standardizedFileURL.pathComponents
+        guard !container.isEmpty, candidate.count > container.count else { return false }
+        return Array(candidate.prefix(container.count)) == container
+    }
+
     // By Adding bundle id to prefix, we will ensure that the correct app will be openned
     public func hasSameSchemePrefix(url: URL?) -> Bool {
         if let url = url, let appDomain = Bundle.main.bundleIdentifier {

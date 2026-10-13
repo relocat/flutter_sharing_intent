@@ -27,11 +27,15 @@ import java.util.*
 object MyFileDirectory {
 
     /**
-     * Plugin-level size cap for content streamed via ContentResolver.
+     * Hard per-file ceiling for content streamed via ContentResolver (FSI-90).
      * A malicious source app can offer an unbounded stream; this cap ensures
-     * we abort and clean up rather than fill the host app's cacheDir (FSI-90).
-     * Host apps that legitimately need a higher cap should override at the
-     * service layer (the host app enforces its own, larger limit; 16 MiB here is the plugin floor).
+     * we abort and clean up rather than fill the host app's cacheDir.
+     *
+     * A host app cannot raise this limit at runtime: changing it means editing
+     * this constant. When any one file in a share exceeds it, the resulting
+     * IOException aborts the whole share: no item of that share reaches Dart,
+     * and the plugin only logs the failure. A host app can enforce a lower
+     * limit of its own, but not a higher one.
      */
     private const val MAX_STREAM_BYTES: Long = 16L * 1024L * 1024L // 16 MiB
 
@@ -205,7 +209,8 @@ object MyFileDirectory {
      *    path prefix the provider might inject).
      * 2. Reject the special names "." and ".."; replace with "unnamed".
      * 3. Strip NUL bytes and C0 control characters (U+0000..U+001F).
-     * 4. Cap at MAX_DISPLAY_NAME_BYTES (255) bytes in UTF-8.
+     * 4. Cap at MAX_DISPLAY_NAME_BYTES (255) bytes in UTF-8, cutting at a code
+     *    point boundary so the result is valid UTF-8 without U+FFFD.
      * 5. Fall back to "unnamed" for null, blank, or empty results.
      *
      * @param raw The raw _display_name string from the ContentResolver cursor.
@@ -231,8 +236,12 @@ object MyFileDirectory {
         val safe: String = if (bytes.size <= MAX_DISPLAY_NAME_BYTES) {
             stripped
         } else {
-            // Truncate at a character boundary within the byte limit
-            String(bytes, 0, MAX_DISPLAY_NAME_BYTES, Charsets.UTF_8)
+            // Truncate at a code point boundary within the byte limit: step back
+            // over UTF-8 continuation bytes (10xxxxxx), so no multi-byte sequence
+            // is split and the decoder never substitutes U+FFFD.
+            var end = MAX_DISPLAY_NAME_BYTES
+            while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) end--
+            String(bytes, 0, end, Charsets.UTF_8)
         }
 
         // Final guard: ensure truncation didn't produce a blank or dot name

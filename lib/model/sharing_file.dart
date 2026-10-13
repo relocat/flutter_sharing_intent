@@ -31,13 +31,18 @@ class SharedFile {
       this.mimeType,
       this.message});
 
+  /// Decodes one item of the native share payload.
+  ///
+  /// Every field is type-checked (FSI-94): a field with an unexpected type is
+  /// treated as absent instead of throwing, so one malformed field cannot
+  /// abort decoding of the whole share.
   SharedFile.fromJson(Map<String, dynamic> json)
-      : value = json['value'] ?? json['path'],
-        thumbnail = json['thumbnail'],
-        duration = json['duration'],
+      : value = _stringOrNull(json['value']) ?? _stringOrNull(json['path']),
+        thumbnail = _stringOrNull(json['thumbnail']),
+        duration = _intOrNull(json['duration']),
         type = _typeFromJson(json['type']),
-        mimeType = json['mimeType'],
-        message = json['message'];
+        mimeType = _stringOrNull(json['mimeType']),
+        message = _stringOrNull(json['message']);
 
   Map<String, dynamic> toMap() {
     return {
@@ -69,5 +74,11 @@ SharedMediaType _typeFromJson(Object? raw) {
   }
   return SharedMediaType.FILE; // conservative fallback for unknown indices
 }
+
+/// Returns [raw] if it is a [String], otherwise null (FSI-94).
+String? _stringOrNull(Object? raw) => raw is String ? raw : null;
+
+/// Returns [raw] if it is an [int], otherwise null (FSI-94).
+int? _intOrNull(Object? raw) => raw is int ? raw : null;
 
 enum SharedMediaType { TEXT, URL, IMAGE, VIDEO, FILE, WEB_SEARCH, OTHER }

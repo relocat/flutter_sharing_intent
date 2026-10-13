@@ -50,4 +50,57 @@ void main() {
       expect(f.type, SharedMediaType.TEXT);
     });
   });
+
+  group('SharedFile.fromJson field type guard (FSI-94)', () {
+    test('well-typed fields decode unchanged', () {
+      final f = SharedFile.fromJson({
+        'value': '/tmp/a.mp4',
+        'thumbnail': '/tmp/a.jpg',
+        'duration': 1500,
+        'type': 3,
+        'mimeType': 'video/mp4',
+        'message': 'hi',
+      });
+      expect(f.value, '/tmp/a.mp4');
+      expect(f.thumbnail, '/tmp/a.jpg');
+      expect(f.duration, 1500);
+      expect(f.type, SharedMediaType.VIDEO);
+      expect(f.mimeType, 'video/mp4');
+      expect(f.message, 'hi');
+    });
+
+    test('non-int duration is treated as absent', () {
+      for (final bad in [
+        '1500',
+        1.5,
+        true,
+        <int>[1],
+        <String, int>{'a': 1}
+      ]) {
+        final f = SharedFile.fromJson({'value': 'x', 'duration': bad});
+        expect(f.duration, isNull, reason: 'duration=$bad');
+        expect(f.value, 'x');
+      }
+    });
+
+    test('non-String value falls back to path, then to null', () {
+      expect(SharedFile.fromJson({'value': 42, 'path': '/p'}).value, '/p');
+      expect(SharedFile.fromJson({'value': 42}).value, isNull);
+      expect(SharedFile.fromJson({'value': null, 'path': 7}).value, isNull);
+      expect(SharedFile.fromJson({'path': '/only/path'}).value, '/only/path');
+    });
+
+    test('non-String thumbnail, mimeType and message are treated as absent',
+        () {
+      final f = SharedFile.fromJson({
+        'value': 'x',
+        'thumbnail': 1,
+        'mimeType': ['image/png'],
+        'message': {'text': 'hi'},
+      });
+      expect(f.thumbnail, isNull);
+      expect(f.mimeType, isNull);
+      expect(f.message, isNull);
+    });
+  });
 }
