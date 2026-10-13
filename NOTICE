@@ -6,6 +6,8 @@ This fork is maintained by Relocat <office@relocat.org> at
 https://github.com/relocat/flutter_sharing_intent. It is based on upstream commit
 aa1672f547d6579585fa27df0b28ffa2a2544aaa (v2.0.4). Relocat modified the following files in 2026;
 the modifications are licensed under Apache-2.0:
+  CHANGELOG.md
+  README.md
   android/build.gradle
   android/src/main/kotlin/com/techind/flutter_sharing_intent/FlutterSharingIntentPlugin.kt
   android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt

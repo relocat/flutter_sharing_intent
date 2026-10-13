@@ -1,3 +1,5 @@
+<!-- Modified by Relocat (2026); see NOTICE. -->
+
 > [!NOTE]
 > **This is Relocat's fork of [flutter_sharing_intent](https://github.com/TSPL-Bhagat/flutter_sharing_intent)**
 > by Bhagat Singh / techind.co and contributors ([pub.dev](https://pub.dev/packages/flutter_sharing_intent)).
@@ -11,23 +13,28 @@
 > **What this fork changes:**
 > - **Android:**
 >   - rejects non-`content://` URIs;
->   - caps each streamed file at 16 MiB;
+>   - caps each streamed file at 16 MiB, a hard limit: one larger file drops the whole share;
 >   - sanitises the provider-supplied `_display_name`, which blocks path traversal;
 >   - handles intents off the main thread;
 >   - prunes video thumbnails older than 7 days;
 >   - removes the unused appcompat, material and constraintlayout dependencies.
 > - **iOS:**
->   - bridges the UIScene lifecycle, so scene-based apps (the Flutter 3.11+ default) receive shares;
+>   - bridges the UIScene lifecycle (the Flutter default since 3.41), so apps that use it receive shares;
 >   - resolves photos off the main thread;
 >   - surfaces decode errors as `DECODE_FAILED` instead of returning an empty list;
 >   - caps raw `Data` payloads at 16 MiB;
->   - sanitises `lastPathComponent`;
+>   - sanitises `lastPathComponent` (path separators and control characters removed, capped at
+>     255 UTF-8 bytes on a character boundary);
 >   - stops release builds from logging file names or paths;
 >   - clears the App Group share-metadata plist as soon as the app reads it.
 > - **Dart / all platforms:**
 >   - new `cleanup(List<String> paths)` deletes the iOS App Group copies after use; it is a no-op
->     on Android;
->   - out-of-range media-type values no longer crash decoding.
+>     on Android. On iOS it deletes only paths strictly inside the App Group container;
+>   - out-of-range media-type values and wrongly typed fields no longer crash decoding.
+>
+> **iOS share extension.** Copy [`ios/Classes/FSIShareViewController.swift`](ios/Classes/FSIShareViewController.swift)
+> into your Share Extension target. The iOS changes above live in that file; the copy under
+> `example/ios/Share Extension/` is upstream's unmodified version.
 >
 > **Licence.** Apache-2.0, unchanged from upstream (see [LICENSE](LICENSE)). Our modifications are
 > released under the same licence; modified files are marked, and [NOTICE](NOTICE) lists them.
@@ -42,16 +49,29 @@
 > [upstream](https://github.com/TSPL-Bhagat/flutter_sharing_intent/issues). Report security
 > issues privately to office@relocat.org.
 >
-> #### Fork-only API: iOS scene-based apps
-> Scene-based apps must forward their `UISceneDelegate` callbacks to the plugin:
+> #### Fork-only API: iOS apps using the UIScene lifecycle
+> UIScene is the default for Flutter iOS apps since Flutter 3.41
+> ([Flutter's migration guide](https://docs.flutter.dev/release/breaking-changes/uiscenedelegate)).
+> This plugin registers only `UIApplicationDelegate` callbacks. It does not yet use the plugin
+> scene API that Flutter 3.38 added (`registrar.addSceneDelegate`), because older Flutter SDKs do not
+> have it. Since Flutter 3.38, `FlutterSceneDelegate` passes scene URL and user-activity events on to
+> plugins that registered only application-delegate callbacks, such as this one.
+>
+> Flutter requires a custom `SceneDelegate` to subclass `FlutterSceneDelegate` (or conform to
+> `FlutterSceneLifeCycleProvider`). In each override, call `super` first and then the plugin's
+> forwarder. The forwarder covers the cases where Flutter does not pass the event on. When Flutter has
+> already delivered the share, the payload is consumed and the forwarder does nothing, so a share is not
+> handled twice.
 > ```swift
+> import Flutter
 > import UIKit
 > import flutter_sharing_intent
 >
-> class SceneDelegate: UIResponder, UIWindowSceneDelegate {
->     func scene(_ scene: UIScene,
->                willConnectTo session: UISceneSession,
->                options connectionOptions: UIScene.ConnectionOptions) {
+> class SceneDelegate: FlutterSceneDelegate {
+>     override func scene(_ scene: UIScene,
+>                         willConnectTo session: UISceneSession,
+>                         options connectionOptions: UIScene.ConnectionOptions) {
+>         super.scene(scene, willConnectTo: session, options: connectionOptions)
 >         SwiftFlutterSharingIntentPlugin.handleSceneURLContexts(
 >             connectionOptions.urlContexts)
 >         if let activity = connectionOptions.userActivities.first {
@@ -59,19 +79,23 @@
 >         }
 >     }
 >
->     func scene(_ scene: UIScene,
->                openURLContexts URLContexts: Set<UIOpenURLContext>) {
+>     override func scene(_ scene: UIScene,
+>                         openURLContexts URLContexts: Set<UIOpenURLContext>) {
+>         super.scene(scene, openURLContexts: URLContexts)
 >         SwiftFlutterSharingIntentPlugin.handleSceneURLContexts(URLContexts)
 >     }
 >
->     func scene(_ scene: UIScene,
->                continue userActivity: NSUserActivity) {
+>     override func scene(_ scene: UIScene,
+>                         continue userActivity: NSUserActivity) {
+>         super.scene(scene, continue: userActivity)
 >         SwiftFlutterSharingIntentPlugin.handleSceneUserActivity(userActivity)
 >     }
 > }
 > ```
 >
-> The existing AppDelegate callbacks are preserved for pre-scene hosts.
+> On a Flutter version that has no `FlutterSceneDelegate`, call the same forwarders from your own
+> `UIWindowSceneDelegate`. The existing AppDelegate callbacks are preserved for apps that do not use
+> UIScene.
 
 # flutter_sharing_intent
 [![pub package](https://img.shields.io/pub/v/flutter_sharing_intent.svg)](https://pub.dev/packages/flutter_sharing_intent)
