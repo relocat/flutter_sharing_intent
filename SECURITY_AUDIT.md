@@ -15,6 +15,9 @@ C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence rev
 - **Upstream license:** Apache-2.0
 - **Fork purpose:** Relocat vendors this plugin because upstream release cadence is slow and several iOS/Android issues affect Relocat directly. Divergence rationale lives in the fork notice at the top of `README.md`.
 - **Earlier fork fixes** (made before this audit):
+  - FSI-11 — Android: removed unused UI dependencies (appcompat, material, constraintlayout).
+  - FSI-21 — Android: reject non-`content://` URIs in share intents.
+  - FSI-23 — Android: prune stale thumbnail cache entries.
   - FSI-24 — Android: intent handling moved off main thread.
   - FSI-31 — Android/iOS/Dart: cleanup API for App Group files.
   - FSI-61 — iOS: surface decode errors instead of swallowing.
@@ -99,8 +102,8 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 
 ### Notes
 
-- Exported Android components declared in `android/src/main/AndroidManifest.xml`: none — the plugin manifest contains only commented-out example snippets. All `<activity>` and `<intent-filter>` entries are commented out. The host app's own manifest is responsible for declaring the exported activity with the intent filters; this plugin contributes no exported components directly. When the host app adds the recommended `android:exported="true"` activity (per plugin README), no `android:permission` guard is shown in the template — this is an in-scope concern for the Relocat mobile app manifest audit, not the plugin itself.
-- iOS `NSExtension` activation rules are defined per-host-app, not in the plugin itself — the plugin provides `FSIShareViewController` which the host configures. The host's activation rule is audited separately as part of the Relocat mobile app review (out of scope here).
+- Exported Android components declared in `android/src/main/AndroidManifest.xml`: none — the plugin manifest contains only commented-out example snippets. All `<activity>` and `<intent-filter>` entries are commented out. The host app's own manifest is responsible for declaring the exported activity with the intent filters; this plugin contributes no exported components directly. When the host app adds the recommended `android:exported="true"` activity (per plugin README), no `android:permission` guard is shown in the template — the host app is responsible for guarding that activity in its own manifest; this is outside the plugin's scope.
+- iOS `NSExtension` activation rules are defined per-host-app, not in the plugin itself — the plugin provides `FSIShareViewController` which the host configures. The host app is responsible for its activation rule (out of scope here).
 - Entry points that carry untrusted data (from a source app's `Intent` / `NSExtensionContext`) are flagged **untrusted** in the table; boundaries where both sides are controlled by the same app process or by the OS delivering a previously-validated redirect are flagged **in-app**.
 
 ## Findings
@@ -218,7 +221,7 @@ Post-fix: 0 Relocat-modified files missing SPDX. Unmodified upstream files (none
 | ID | Severity | Title | Status |
 |---|---|---|---|
 | DEP-01 | Low | `plugin_platform_interface` declared with floating `^` range in pubspec.yaml | Open — cosmetic; pin on next dependency update cycle |
-| DEP-02 | Low | Android Gradle Plugin pinned at `7.3.0` (2022-era; current is 8.x) | Open — no active CVE; bump recommended before next Play Store submission |
+| DEP-02 | Low | Android Gradle Plugin pinned at `7.3.0` (2022-era; current is 8.x) | Open — no active CVE; bump recommended |
 | DEP-03 | Low | iOS podspec deployment target `12.0` (iOS 12 EOL; misleading for Flutter 3.22+) | Open — raise to `13.0` on next podspec update |
 | SPDX-01 | Low | All 8 Relocat-modified source files missing SPDX-License-Identifier | Fixed — commit `a80d489` |
 
@@ -281,6 +284,14 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 | 2026-04-21 | C3 close: residual risks + SHA backfill. | Relocat maintainers |
 | 2026-04-21 | SPDX headers added to all 8 Relocat-modified source files (C4). | Relocat maintainers |
 | 2026-04-21 | Dependency & license review complete (C4). | Relocat maintainers |
+| 2026-04-21 | Addendum: R-SI-03 resolved (`b0d272b`). | Relocat maintainers |
+| 2026-06-15 | Addendum: FSI-95 fixed, App Group share-metadata plist wipe (`f01fef4`). | Relocat maintainers |
+| 2026-10-13 | Public wording, chronological addenda, complete list of earlier fork fixes. | Relocat maintainers |
+
+## Addendum (2026-04-21): R-SI-03 resolved
+
+R-SI-03 (unguarded `print()` calls in `FSIShareViewController`) is fixed in `b0d272b`: release builds
+no longer log file names or paths.
 
 ## Addendum (2026-06-15): FSI-95, App Group share-metadata plist wipe
 
@@ -292,8 +303,3 @@ The iOS share extension stores share metadata in the App Group `UserDefaults`, w
 plist on disk. The plugin now wipes that plist as soon as the app reads it, so file names and paths
 of shared items no longer linger at rest. Found in a later native review round (2026-06-10), fixed 2026-06-15. The same commit also gates the
 path logging in `cleanupFiles` behind `#if DEBUG`.
-
-## Addendum (2026-04-21): R-SI-03 resolved
-
-R-SI-03 (unguarded `print()` calls in `FSIShareViewController`) is fixed in `b0d272b`: release builds
-no longer log file names or paths.
