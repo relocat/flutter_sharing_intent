@@ -350,4 +350,4 @@ stripping.
   U+FFFD).
 - Dart: `flutter test` passes 16 of 16. The previous `sharing_file.dart` fails the 3 new negative
   tests.
-- iOS compile (`flutter build ios --simulator --no-codesign` and `swift test` on macOS): PENDING.
+- iOS compile and tests on macOS (GitHub-hosted macOS runner, 2026-10-13): the example app builds with `flutter build ios --simulator --no-codesign`, the plugin Swift sources and the README SceneDelegate sample type-check, and the 32 Swift logic tests pass (`swift test`).
