@@ -4,7 +4,7 @@
 **Auditor:** Relocat maintainers
 **Scope:** everything under this repository except `example/` and `build/`.
 **Methodology:** STRIDE-lite per-entry-point + remediation-commit review + dependency & license audit.
-**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale. FSI-96..99 were fixed on 2026-10-13; see the addendum below.
+**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale. FSI-96..99 were fixed on 2026-10-13 and FSI-100..103 on 2026-11-03; see the addenda below.
 
 Task labels C1-C4 in the revision history are the audit's own work phases:
 C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence review.
@@ -13,7 +13,7 @@ C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence rev
 
 - **Upstream:** https://github.com/TSPL-Bhagat/flutter_sharing_intent
 - **Upstream license:** Apache-2.0
-- **Fork purpose:** Relocat vendors this plugin because upstream release cadence is slow and several iOS/Android issues affect Relocat directly. Divergence rationale lives in the fork notice at the top of `README.md`.
+- **Fork purpose:** Relocat vendors this plugin because Relocat needs these fixes before a pub.dev release contains them, and several iOS/Android issues affect Relocat directly. Divergence rationale lives in the fork notice at the top of `README.md`.
 - **Earlier fork fixes** (made before this audit):
   - FSI-11 — Android: removed unused UI dependencies (appcompat, material, constraintlayout).
   - FSI-21 — Android: reject non-`content://` URIs in share intents.
@@ -290,6 +290,7 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 | 2026-06-15 | Addendum: FSI-95 fixed, App Group share-metadata plist wipe (`f01fef4`). | Relocat maintainers |
 | 2026-10-13 | Public wording, chronological addenda, complete list of earlier fork fixes. | Relocat maintainers |
 | 2026-10-13 | Addendum: FSI-96..99 fixed (`7c09732`); FSI-90, FSI-94, R-SI-01/02 and DEP-02 wording corrected. | Relocat maintainers |
+| 2026-11-03 | Addendum: FSI-100..103 fixed (content URIs always copied, no share content in logs, per-share directories, cleanup removes only regular files); wording corrections. | Relocat maintainers |
 
 ## Addendum (2026-04-21): R-SI-03 resolved
 
@@ -309,7 +310,7 @@ path logging in `cleanupFiles` behind `#if DEBUG`.
 
 ## Addendum (2026-10-13): FSI-96..99, cleanup guard, name truncation, control characters, field types
 
-An independent review of the published fork found the following. All four are fixed in `7c09732`.
+An internal review before publication found the following. All four are fixed in `7c09732`.
 
 | Finding ID | Severity | Title | Status | Fix commit |
 |---|---|---|---|---|
@@ -351,3 +352,44 @@ stripping.
 - Dart: `flutter test` passes 16 of 16. The previous `sharing_file.dart` fails the 3 new negative
   tests.
 - iOS compile and tests on macOS (GitHub-hosted macOS runner, 2026-10-13): the example app builds with `flutter build ios --simulator --no-codesign`, the plugin Swift sources and the README SceneDelegate sample type-check, and the 32 Swift logic tests pass (`swift test`).
+
+## Addendum (2026-11-03): FSI-100..103, URI handling, logging, cache layout, iOS cleanup
+
+An internal review before publication found the following. All four are fixed in this revision.
+
+| Finding ID | Severity | Title | Status |
+|---|---|---|---|
+| FSI-100 | High | Android: some `content://` document URIs were resolved to a path derived from the URI instead of a cache copy | Fixed |
+| FSI-101 | Medium | Android: share payloads, paths and file names were logged in release builds | Fixed |
+| FSI-102 | Medium | Android: shared files were written straight into the root of the app cache directory under the sender-supplied name | Fixed |
+| FSI-103 | Low | iOS: `cleanup` could remove directories recursively | Fixed |
+
+**FSI-100.** Extends FSI-21. `getAbsolutePath` now accepts only `content://` URIs and always copies the
+stream (16 MiB cap, FSI-90) into the plugin's cache; no path is ever derived from the URI. The
+document-provider special cases that returned a path directly are removed, as is the fallback that
+returned the URI's own path. A URI without an authority yields no result, and the provider-supplied
+`_data` column is no longer returned. `android/jvm-tests/` holds the unit tests.
+
+**FSI-101.** Log lines now carry counts and types only: no payload, path, URI, file name or exception
+message. Exceptions are logged by class name. A test fails if a `Log` call interpolates share content.
+
+**FSI-102.** Each shared item is written to its own directory,
+`<cacheDir>/flutter_sharing_intent/<random UUID>/<sanitised name>`, so a share cannot overwrite another
+cache file and nothing is written to the cache root. The sanitised display name stays the file name.
+Video thumbnails go to a separate root, `<cacheDir>/flutter_sharing_intent_thumbnails/<random UUID>.png`.
+The plugin prunes UUID-named share directories and thumbnails older than 7 days, and no longer scans the
+cache root. Residual risk: the OS, not the plugin, reclaims a share directory before it is 7 days old.
+
+**FSI-103.** `cleanupFiles` already required a path strictly inside the App Group container (FSI-96). It
+now also requires a regular file (`isRegularFile`, which does not follow symbolic links) and refuses
+directories, symbolic links and missing paths, so `removeItem` can no longer delete a directory tree.
+
+**Not changed.** Item counts are not capped (R-SI-01, R-SI-02), and iOS copies made from file URLs are
+uncapped: only raw `Data` is capped at 16 MiB.
+
+**Verification.**
+- Android: the real `MyFileDirectory.kt` is compiled with kotlinc against Java stand-ins for the
+  `android.*` classes and run on the JVM (`android/jvm-tests/run.sh`). Each fix has a negative control
+  that reintroduces the old behaviour and must fail its tests.
+- Swift: `ios/LogicTests/` holds the Swift logic tests; the functions are copied byte-for-byte from
+  the iOS sources. On a GitHub-hosted macOS runner (2026-11-03) the example app builds, the plugin Swift sources type-check, and the 36 logic tests pass; the negative control (regular-file check disabled) fails as expected.
