@@ -2,19 +2,15 @@
 // Modified by Relocat (2026); see NOTICE.
 package com.techind.flutter_sharing_intent
 
-import android.content.ContentUris
 import android.content.Context
 import android.database.Cursor
 import android.net.Uri
-import android.os.Build
-import android.os.Environment
-import android.provider.DocumentsContract
-import android.provider.MediaStore
 import android.util.Log
 import android.webkit.MimeTypeMap
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
 import java.util.*
 
 /**
@@ -45,10 +41,32 @@ object MyFileDirectory {
      */
     private const val MAX_DISPLAY_NAME_BYTES: Int = 255
 
+    /** Root directory below cacheDir that holds every per-share directory (FSI-102). */
+    const val SHARE_CACHE_DIR_NAME: String = "flutter_sharing_intent"
+
+    /** Separate cacheDir root for generated video thumbnails (FSI-102). */
+    const val THUMBNAIL_CACHE_DIR_NAME: String = "flutter_sharing_intent_thumbnails"
+
+    private const val THUMBNAIL_SUFFIX = ".png"
+    private const val DISPLAY_NAME_COLUMN = "_display_name"
+    private const val COPY_BUFFER_BYTES = 8192
+    private const val BYTES_PER_MIB = 1024 * 1024
+
+    /** Age after which a per-share directory or thumbnail is pruned (FSI-23, FSI-102). */
+    const val CACHE_ENTRY_TTL_MILLIS: Long = 7L * 24L * 60L * 60L * 1000L
+
+    /** Canonical lowercase UUID v4 text form, as produced by [UUID.randomUUID]. */
+    private val UUID_PATTERN = Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+
     /**
-     * Get a file path from a Uri. This will get the the path for Storage Access
-     * Framework Documents, as well as the _data field for the MediaStore and
-     * other file-based ContentProviders.
+     * Copies the content behind [uri] into the plugin's cache and returns the
+     * path of the copy, or null when the URI cannot be copied (FSI-100).
+     *
+     * No path is ever derived from the URI itself: its path, its document id
+     * and the provider's `_data` column are all sender-controlled, so the only
+     * path this function returns is one the plugin created under its own
+     * per-share cache directory. Every content:// URI, document providers
+     * included, takes the same capped copy.
      *
      * @param context The context.
      * @param uri The Uri to query.
@@ -60,144 +78,153 @@ object MyFileDirectory {
         // file:// and other schemes from untrusted sharers can point at our
         // own sandbox (FSI-21).
         if (!"content".equals(uri.scheme, ignoreCase = true)) {
-            Log.w("FlutterSharingIntent",
-                "Rejected non-content URI scheme: ${uri.scheme}")
+            Log.w("FlutterSharingIntent", "Rejected non-content URI scheme")
             return null
         }
 
-        // DocumentProvider
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT && DocumentsContract.isDocumentUri(context, uri)) {
-            // ExternalStorageProvider
-            if (isExternalStorageDocument(uri)) {
-                val docId = DocumentsContract.getDocumentId(uri)
-                val split = docId.split(":".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
-                val type = split[0]
-
-                return if ("primary".equals(type, ignoreCase = true)) {
-                    Environment.getExternalStorageDirectory().toString() + "/" + split[1]
-                } else {
-                    getDataColumn(context, uri, null, null)
-                }
-            } else if (isDownloadsDocument(uri)) {
-                return try {
-                    val id = DocumentsContract.getDocumentId(uri)
-                    val contentUri = ContentUris.withAppendedId(
-                        Uri.parse("content://downloads/public_downloads"), java.lang.Long.valueOf(id))
-
-                    getDataColumn(context, contentUri, null, null)
-                } catch (exception: Exception) {
-                    getDataColumn(context, uri, null, null)
-                }
-            } else if (isMediaDocument(uri)) {
-                val docId = DocumentsContract.getDocumentId(uri)
-                val split = docId.split(":".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
-                val type = split[0]
-
-                var contentUri: Uri? = null
-                when (type) {
-                    "image" -> contentUri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                    "video" -> contentUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                    "audio" -> contentUri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                }
-
-                if (contentUri == null) return null
-
-                val selection = "_id=?"
-                val selectionArgs = arrayOf(split[1])
-                return getDataColumn(context, contentUri, selection, selectionArgs)
-            }// MediaProvider
-            // DownloadsProvider
-        } else if ("content".equals(uri.scheme, ignoreCase = true)) {
-            return getDataColumn(context, uri, null, null)
-        }
-
-        return uri.path
+        return getDataColumn(context, uri)
     }
 
     /**
-     * Get the value of the data column for this Uri. This is useful for
-     * MediaStore Uris, and other file-based ContentProviders.
+     * Copies the stream behind [uri] into a fresh per-share directory below
+     * the plugin cache root and returns the copy's path (FSI-100, FSI-102).
+     *
+     * The display name comes from the provider and is only ever used as the
+     * leaf name, after [sanitizeDisplayName]. A URI without an authority names
+     * no provider, so it yields null instead of falling back to a provider
+     * supplied `_data` path.
      *
      * @param context The context.
-     * @param uri The Uri to query.
-     * @param selection (Optional) Filter used in the query.
-     * @param selectionArgs (Optional) Selection arguments used in the query.
-     * @return The value of the _data column, which is typically a file path.
+     * @param uri The Uri to copy.
+     * @return The path of the cache copy, or null if there is nothing to copy.
      */
-    private fun getDataColumn(context: Context, uri: Uri, selection: String?,
-                              selectionArgs: Array<String>?): String? {
+    private fun getDataColumn(context: Context, uri: Uri): String? {
+        if (uri.authority == null) return null
 
-        if (uri.authority != null) {
-            var cursor: Cursor? = null
-            val column = "_display_name"
-            val projection = arrayOf(column)
-            var targetFile: File? = null
-            try {
-                cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, null)
-                if (cursor != null && cursor.moveToFirst()) {
-                    val columnIndex = cursor.getColumnIndexOrThrow(column)
-                    val rawName = cursor.getString(columnIndex)
-                    // SECURITY (FSI-91): _display_name is provider-controlled. Sanitize
-                    // before using as a cache filename to prevent path traversal.
-                    val fileName = sanitizeDisplayName(rawName)
-                    Log.i("FileDirectory", "File name (sanitized): $fileName")
-                    targetFile = File(context.cacheDir, fileName)
-                }
-            } finally {
-                cursor?.close()
-            }
-
-            if (targetFile == null) {
-                val mimeType = context.contentResolver.getType(uri)
-                val prefix = with(mimeType ?: "") {
-                    when {
-                        startsWith("image") -> "IMG"
-                        startsWith("video") -> "VID"
-                        else -> "FILE"
-                    }
-                }
-                val type = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
-                targetFile = File(context.cacheDir, "${prefix}_${Date().time}.$type")
-            }
-
-            // SECURITY (FSI-90): Enforce a 16 MiB cap on content streamed from
-            // a provider-controlled URI. Abort and delete the partial file if
-            // the source exceeds the cap.
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(targetFile).use { fileOut ->
-                    val buffer = ByteArray(8192)
-                    var totalWritten: Long = 0
-                    var read: Int
-                    while (input.read(buffer).also { read = it } != -1) {
-                        totalWritten += read
-                        if (totalWritten > MAX_STREAM_BYTES) {
-                            fileOut.close()
-                            targetFile!!.delete()
-                            throw IOException(
-                                "flutter_sharing_intent: source exceeds ${MAX_STREAM_BYTES / (1024 * 1024)} MiB plugin cap"
-                            )
-                        }
-                        fileOut.write(buffer, 0, read)
-                    }
+        val displayName = queryDisplayName(context, uri)
+        val targetFile = if (displayName != null) {
+            newShareTargetFile(context.cacheDir, sanitizeDisplayName(displayName))
+        } else {
+            val mimeType = context.contentResolver.getType(uri)
+            val prefix = with(mimeType ?: "") {
+                when {
+                    startsWith("image") -> "IMG"
+                    startsWith("video") -> "VID"
+                    else -> "FILE"
                 }
             }
-            return targetFile.path
+            val type = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+            newShareTargetFile(context.cacheDir, "${prefix}_${Date().time}.$type")
         }
 
-        var cursor: Cursor? = null
-        val column = "_data"
-        val projection = arrayOf(column)
+        // SECURITY (FSI-90): Enforce a 16 MiB cap on content streamed from
+        // a provider-controlled URI. Abort and delete the partial file if
+        // the source exceeds the cap.
+        val input = context.contentResolver.openInputStream(uri)
+        if (input == null) {
+            targetFile.parentFile?.deleteRecursively()
+            return null
+        }
+        input.use {
+            FileOutputStream(targetFile).use { fileOut ->
+                val buffer = ByteArray(COPY_BUFFER_BYTES)
+                var totalWritten: Long = 0
+                var read: Int
+                while (input.read(buffer).also { read = it } != -1) {
+                    totalWritten += read
+                    if (totalWritten > MAX_STREAM_BYTES) {
+                        fileOut.close()
+                        targetFile.parentFile?.deleteRecursively()
+                        throw IOException(
+                            "flutter_sharing_intent: source exceeds ${MAX_STREAM_BYTES / BYTES_PER_MIB} MiB plugin cap"
+                        )
+                    }
+                    fileOut.write(buffer, 0, read)
+                }
+            }
+        }
+        return targetFile.path
+    }
 
+    /** Returns the provider's `_display_name` for [uri], or null if it has none. */
+    private fun queryDisplayName(context: Context, uri: Uri): String? {
+        var cursor: Cursor? = null
         try {
-            cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, null)
+            cursor = context.contentResolver.query(uri, arrayOf(DISPLAY_NAME_COLUMN), null, null, null)
             if (cursor != null && cursor.moveToFirst()) {
-                val columnIndex = cursor.getColumnIndexOrThrow(column)
+                val columnIndex = cursor.getColumnIndexOrThrow(DISPLAY_NAME_COLUMN)
                 return cursor.getString(columnIndex)
             }
         } finally {
             cursor?.close()
         }
         return null
+    }
+
+    /**
+     * Creates a new, empty per-share directory and returns the file to write
+     * inside it (FSI-102).
+     *
+     * Layout: `<cacheDir>/flutter_sharing_intent/<random UUID>/<name>`. Each
+     * share item gets its own directory, so a sender can never overwrite
+     * another cache file, and nothing is written to the cacheDir root. Stale
+     * per-share directories are pruned first.
+     *
+     * @param cacheDir The host app cache directory.
+     * @param fileName An already sanitised leaf name.
+     */
+    internal fun newShareTargetFile(cacheDir: File, fileName: String): File {
+        pruneStaleEntries(File(cacheDir, SHARE_CACHE_DIR_NAME), requireUuidDirectories = true)
+        val shareDirectory = File(File(cacheDir, SHARE_CACHE_DIR_NAME), UUID.randomUUID().toString())
+        if (!shareDirectory.mkdirs()) {
+            throw IOException("flutter_sharing_intent: cannot create share directory")
+        }
+        return File(shareDirectory, fileName)
+    }
+
+    /**
+     * Returns a fresh, unique PNG path for a video thumbnail (FSI-102).
+     *
+     * Thumbnails live in their own root,
+     * `<cacheDir>/flutter_sharing_intent_thumbnails/<random UUID>.png`, never
+     * inside a per-share directory and never under a sender-chosen name.
+     * Stale thumbnails are pruned first (FSI-23).
+     */
+    internal fun newThumbnailFile(cacheDir: File): File {
+        val root = File(cacheDir, THUMBNAIL_CACHE_DIR_NAME)
+        pruneStaleEntries(root, requireUuidDirectories = false)
+        if (!root.isDirectory && !root.mkdirs()) {
+            throw IOException("flutter_sharing_intent: cannot create thumbnail directory")
+        }
+        return File(root, "${UUID.randomUUID()}.png")
+    }
+
+    /**
+     * Deletes direct children of [root] last modified more than
+     * [CACHE_ENTRY_TTL_MILLIS] ago. Only entries this plugin could have
+     * created are touched: UUID-named directories under the share root, or
+     * `.png` files under the thumbnail root. Symbolic links are never
+     * followed or deleted. Best-effort: a failure is logged without any path.
+     */
+    internal fun pruneStaleEntries(
+        root: File,
+        requireUuidDirectories: Boolean,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
+        val cutoff = nowMillis - CACHE_ENTRY_TTL_MILLIS
+        try {
+            root.listFiles()?.forEach { entry ->
+                if (Files.isSymbolicLink(entry.toPath()) || entry.lastModified() >= cutoff) return@forEach
+                val isOurs = if (requireUuidDirectories) {
+                    entry.isDirectory && UUID_PATTERN.matches(entry.name)
+                } else {
+                    entry.isFile && entry.name.endsWith(THUMBNAIL_SUFFIX)
+                }
+                if (isOurs) entry.deleteRecursively()
+            }
+        } catch (e: SecurityException) {
+            Log.w("FlutterSharingIntent", "Cache prune failed: ${e.javaClass.simpleName}")
+        }
     }
 
     /**
@@ -247,29 +274,5 @@ object MyFileDirectory {
         // Final guard: ensure truncation didn't produce a blank or dot name
         if (safe.isBlank() || safe == "." || safe == "..") return "unnamed"
         return safe
-    }
-
-    /**
-     * @param uri The Uri to check.
-     * @return Whether the Uri authority is ExternalStorageProvider.
-     */
-    private fun isExternalStorageDocument(uri: Uri): Boolean {
-        return "com.android.externalstorage.documents" == uri.authority
-    }
-
-    /**
-     * @param uri The Uri to check.
-     * @return Whether the Uri authority is DownloadsProvider.
-     */
-    private fun isDownloadsDocument(uri: Uri): Boolean {
-        return "com.android.providers.downloads.documents" == uri.authority
-    }
-
-    /**
-     * @param uri The Uri to check.
-     * @return Whether the Uri authority is MediaProvider.
-     */
-    private fun isMediaDocument(uri: Uri): Boolean {
-        return "com.android.providers.media.documents" == uri.authority
     }
 }

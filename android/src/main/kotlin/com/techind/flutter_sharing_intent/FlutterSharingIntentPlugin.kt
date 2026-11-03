@@ -24,7 +24,6 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.io.FileOutputStream
 import java.net.URLConnection
 import java.util.concurrent.ExecutorService
@@ -32,7 +31,7 @@ import java.util.concurrent.Executors
 
 private const val EVENTS_CHANNEL_MEDIA = "flutter_sharing_intent/events-sharing"
 
-private const val THUMBNAIL_TTL_MILLIS = 7L * 24L * 60L * 60L * 1000L
+private const val THUMBNAIL_PNG_QUALITY = 100
 
 /**
  **  Author - Bhagat Singh
@@ -103,10 +102,11 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
         result.success(null)
       }
       "cleanup" -> {
-        // Android: no-op. Plaintext-gap (FSI-31) only applies to iOS
-        // App Group containers. Android's ContentResolver surfaces URIs
-        // to provider-owned storage rather than persisting a plugin-owned
-        // copy, so there is nothing for the plugin to delete here.
+        // Android: no-op. Plaintext-gap (FSI-31) only applies to iOS App
+        // Group containers. Shared files are copied into per-share
+        // directories under cacheDir/flutter_sharing_intent/ (FSI-102); the
+        // plugin prunes stale ones itself on the next share, and the OS may
+        // reclaim cacheDir at any time.
         result.success(null)
       }
       else -> result.notImplemented()
@@ -289,42 +289,22 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
   /**
    * Generates a PNG thumbnail for a shared video and returns its cache path.
    *
-   * Thumbnails are written to [applicationContext]'s cacheDir keyed by the source
-   * filename. To prevent unbounded growth (FSI-23), this function prunes any
-   * plugin-generated `*.png` entries older than [THUMBNAIL_TTL_MILLIS] before
-   * writing the new thumbnail. The prune is best-effort — failures are logged
-   * and do not abort thumbnail generation.
+   * Thumbnails are written to their own cache root under a random file name
+   * ([MyFileDirectory.newThumbnailFile]), never next to the shared file and
+   * never under a sender-chosen name. Stale thumbnails are pruned there
+   * (FSI-23) before the new one is written.
    */
   private fun getThumbnail(path: String, type: MediaType): String? {
     if (type != MediaType.VIDEO) return null // get video thumbnail only
 
-    pruneStaleThumbnails(applicationContext.cacheDir)
-
-    val videoFile = File(path)
-    val targetFile = File(applicationContext.cacheDir, "${videoFile.name}.png")
     val bitmap = ThumbnailUtils.createVideoThumbnail(path, MediaStore.Video.Thumbnails.MINI_KIND)
       ?: return null
+    val targetFile = MyFileDirectory.newThumbnailFile(applicationContext.cacheDir)
     FileOutputStream(targetFile).use { out ->
-      bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+      bitmap.compress(Bitmap.CompressFormat.PNG, THUMBNAIL_PNG_QUALITY, out)
     }
     bitmap.recycle()
     return targetFile.path
-  }
-
-  // Shared with getThumbnail — evicts stale plugin-generated thumbnails
-  // to prevent unbounded cacheDir growth (FSI-23).
-  private fun pruneStaleThumbnails(cacheDir: File) {
-    val cutoff = System.currentTimeMillis() - THUMBNAIL_TTL_MILLIS
-    try {
-      cacheDir.listFiles { f -> f.isFile && f.name.endsWith(".png") }
-        ?.forEach { file ->
-          if (file.lastModified() < cutoff) {
-            file.delete()
-          }
-        }
-    } catch (e: SecurityException) {
-      Log.w("FlutterSharingIntent", "Thumbnail prune failed: ${e.message}")
-    }
   }
 
   private fun getDuration(path: String, type: MediaType): Long? {
