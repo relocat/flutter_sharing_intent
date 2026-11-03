@@ -207,8 +207,8 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
     /// Deletes shared-file copies from the App Group container after the host
     /// app has processed them (FSI-31). Best-effort: per-file errors are logged
     /// and swallowed; the method never throws back to Dart. A path is deleted
-    /// only if `isStrictlyInsideContainer` accepts it; every other path is
-    /// refused.
+    /// only if `isStrictlyInsideContainer` accepts it and it names a regular
+    /// file (`isRegularFile`); every other path is refused.
     private func cleanupFiles(paths: [String]) {
         guard let groupUrl = self.appGroupContainerURL() else {
             NSLog("[FSI] cleanup: no App Group container URL available")
@@ -228,6 +228,13 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                 #else
                 NSLog("[FSI] cleanup: refusing to delete path outside container")
                 #endif
+                continue
+            }
+            // SECURITY (FSI-103): `removeItem` deletes directories recursively
+            // and the plugin only ever writes regular files, so anything else
+            // (a directory, a symlink, a missing path) is refused.
+            guard Self.isRegularFile(atPath: p) else {
+                NSLog("[FSI] cleanup: refusing to delete a non-regular item")
                 continue
             }
             do {
@@ -272,6 +279,17 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         let container = containerURL.standardizedFileURL.pathComponents
         guard !container.isEmpty, candidate.count > container.count else { return false }
         return Array(candidate.prefix(container.count)) == container
+    }
+
+    /// Returns true only if `path` names a regular file. The check does not
+    /// follow symbolic links (`attributesOfItem` reports the link itself), so a
+    /// symlink, a directory, a missing path and an empty path are all refused
+    /// and `cleanupFiles` never deletes recursively (FSI-103).
+    static func isRegularFile(atPath path: String) -> Bool {
+        guard !path.isEmpty,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let type = attributes[.type] as? FileAttributeType else { return false }
+        return type == .typeRegular
     }
 
     // By Adding bundle id to prefix, we will ensure that the correct app will be openned
