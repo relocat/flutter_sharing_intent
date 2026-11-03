@@ -7,6 +7,7 @@
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import com.techind.flutter_sharing_intent.MyFileDirectory
 import java.io.File
 import java.io.IOException
@@ -149,6 +150,20 @@ private fun testPruning() {
     check("thumbnail prune: cacheDir root files untouched", rootPng.exists())
 }
 
+// R-1: static check that no Log call interpolates share content.
+private val forbiddenInterpolation = Regex("""\$(value|it|fileName|path|uri|targetFile|rawName|displayName|text)\b|\$\{(value|it|fileName|path|uri|targetFile|rawName|displayName|text)\}|\.message|Log\.\w\([^)]*,\s*(t|e)\)""")
+
+private fun testNoShareContentInLogs(sourceDir: File) {
+    val offenders = sourceDir.walkTopDown().filter { it.extension == "kt" }.flatMap { file ->
+        file.readLines().withIndex()
+            .filter { (_, line) -> line.contains("Log.") && forbiddenInterpolation.containsMatchIn(line) }
+            .map { (index, line) -> "${file.name}:${index + 1}: ${line.trim()}" }
+    }.toList()
+    check("R-1 no Log call interpolates share content", offenders.isEmpty(), offenders.joinToString(" | "))
+    val seen = Log.MESSAGES.joinToString("\n")
+    check("R-1 runtime log lines carry no file name", !seen.contains("photo.jpg") && !seen.contains("same.txt"), seen)
+}
+
 fun main(args: Array<String>) {
     testPrimaryDocumentIdCannotEscape()
     testThirdPartyDocumentProviderNeverReturnsUriPath()
@@ -158,6 +173,7 @@ fun main(args: Array<String>) {
     testExistingCacheFileIsNeverOverwritten()
     testOversizedSourceLeavesNothingBehind()
     testPruning()
+    testNoShareContentInLogs(File(args[0]))
     println(if (failures == 0) "ALL PASS" else "FAILURES: $failures")
     System.exit(failures)
 }

@@ -152,14 +152,14 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
       val value: JSONArray? = try {
         computeSharingPayload(intent)
       } catch (t: Throwable) {
-        Log.e(TAG, "handleIntent failed", t)
+        Log.e(TAG, "handleIntent failed: ${t.javaClass.simpleName}")
         return@execute
       }
 
       mainHandler.post {
         if (initial) initialSharing = value
         latestSharing = value
-        Log.w(TAG, "$tag : handleIntent ==>> $value")
+        Log.w(TAG, "$tag : handleIntent delivered ${value?.length() ?: 0} item(s)")
         eventSinkSharing?.success(value?.toString())
       }
     }
@@ -353,7 +353,7 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
 
 
         latestSharing?.let {
-          Log.d(TAG, "Sending cached sharing data onListen: $it")
+          Log.d(TAG, "Cached sharing data present onListen: ${it.length()} item(s)")
 //          eventSinkSharing?.success(it.toString())
         }
       }
