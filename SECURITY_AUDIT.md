@@ -4,7 +4,7 @@
 **Auditor:** Relocat maintainers
 **Scope:** everything under this repository except `example/` and `build/`.
 **Methodology:** STRIDE-lite per-entry-point + remediation-commit review + dependency & license audit.
-**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale. FSI-96..99 were fixed on 2026-10-13 and FSI-100..106 on 2026-11-03/04; see the addenda below.
+**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale. FSI-96..99 were fixed on 2026-10-13 and FSI-100..107 on 2026-11-03/04; see the addenda below.
 
 Task labels C1-C4 in the revision history are the audit's own work phases:
 C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence review.
@@ -262,10 +262,7 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 
 ### R-SI-05: Dead code writeTempFile(_:to:) (iOS)
 
-**File:** `ios/Classes/FSIShareViewController.swift` — `writeTempFile` method is defined but unreachable.
-**Risk:** None directly. Dead code that differs from the active path (`writeTempImage`) could create confusion and maintenance risk.
-**Justification for deferral:** Hygiene issue only, not a security finding. Tracked as a fork hygiene follow-up.
-**Owner:** fork hygiene follow-up.
+**Status:** Resolved. The unused `writeTempFile` method was removed (FSI-107).
 
 ## Related
 
@@ -293,6 +290,7 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 | 2026-11-03 | Addendum: FSI-100..103 fixed (content URIs always copied, no share content in logs, per-share directories, cleanup removes only regular files); wording corrections. | Relocat maintainers |
 | 2026-11-04 | Addendum: FSI-104, FSI-105 fixed (failed copies leave nothing behind, links are never followed, cache roots are re-created, iOS files live in a plugin-owned subdirectory and cleanup is limited to it). | Relocat maintainers |
 | 2026-11-04 | Addendum: FSI-106 fixed (API level, partial deletes, thumbnails, Android `cleanup`, log allowlist, iOS directory checks). | Relocat maintainers |
+| 2026-11-04 | Addendum: FSI-107 fixed (share-extension file protection, staged-file cleanup on cancel and error, strict bundle-id encoding, release-build logging). | Relocat maintainers |
 
 ## Addendum (2026-04-21): R-SI-03 resolved
 
@@ -459,3 +457,29 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
   - The descriptions of FSI-90..94 are descriptive only.
 - **Example app.** `example/ios/Share Extension/FSIShareViewController.swift` is now a copy of the
   hardened `ios/Classes/FSIShareViewController.swift`, and the README setup step points there.
+
+## Addendum (2026-11-04): FSI-107, share-extension hardening
+
+| Finding ID | Severity | Title | Status |
+|---|---|---|---|
+| FSI-107 | Medium | iOS: staged files were not protected while the device is locked, were left behind on cancel or error, and the redirect URL embedded the bundle id with a permissive character set | Fixed |
+
+- Every file the share extension stages is written with complete file protection (`.completeFileProtection`
+  on data writes, and the class is raised on copied files), so it is unreadable while the device is locked.
+- The extension tracks everything it staged in one invocation (per-share directories and thumbnails) and
+  deletes it on cancel and on error. On success the files are kept, because the host app reads them and then
+  calls `cleanup`. This is in addition to the immediate removal of a directory whose write failed.
+- A video thumbnail is written to `<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg`; the name is
+  unique per thumbnail, and an existing file is never reused.
+- The bundle id embedded in the redirect URL is percent-encoded with a strict character set (letters,
+  digits, `.`, `-`); if it cannot be encoded the extension exits instead of using the raw id.
+- A missing `AppGroupId` Info.plist key is logged, because a derived group id stops matching the
+  entitlement when the bundle id changes. The derived fallback itself is unchanged.
+- `toString` is private and compiled only in debug builds; the debug logger is compiled out of release builds
+  and no longer logs the host or group identifiers.
+- The unused `writeTempFile` method was removed (R-SI-05).
+- Residuals: the extension cannot tell that a share comes from the host app itself, because items arrive as local
+  file URLs; the host app's Dart layer performs that check. The metadata plist of the App Group `UserDefaults`
+  keeps the OS default protection class; the plugin deletes it when read (FSI-95), which limits the window to the hand-off.
+- Verification: the encoding helper and the staged-item removal are unit-tested; the other guarantees are pinned from
+  the shipped source and each pin has a negative control.

@@ -73,6 +73,12 @@ open class FSIShareViewController: SLComposeServiceViewController {
     // Debug
     private let debugLogs = false
 
+    /// Everything this invocation wrote into the App Group container: per-share
+    /// directories and thumbnails. On cancel or error all of it is deleted so no
+    /// partially staged plaintext is left behind; on success it is kept, because
+    /// the host app reads the files and deletes them afterwards.
+    private var stagedURLs: [URL] = []
+
     // MARK: - Security constants
 
     /// Plugin-level cap for raw Data payloads delivered by share extensions (FSI-92).
@@ -96,6 +102,13 @@ open class FSIShareViewController: SLComposeServiceViewController {
         loadIds()
     }
     
+    open override func didSelectCancel() {
+        // The base class does not clean up: remove anything already staged
+        // before the standard cancel.
+        cleanupStagedFiles()
+        super.didSelectCancel()
+    }
+
     open override func isContentValid() -> Bool {
         return true
     }
@@ -132,11 +145,22 @@ open class FSIShareViewController: SLComposeServiceViewController {
             hostAppBundleIdentifier = shareExtId
         }
         let custom = Bundle.main.object(forInfoDictionaryKey: kAppGroupIdKey) as? String
+        if custom == nil {
+            // The derived group id stops matching the entitlement when the
+            // bundle id changes (for example under enterprise re-signing); the
+            // container URL is then nil and shares would be dropped silently.
+            // Declare the id explicitly with the Info.plist key to avoid that.
+            log("WARNING: Info.plist '\(kAppGroupIdKey)' missing; using derived app-group id")
+        }
         appGroupId = custom ?? "group.\(hostAppBundleIdentifier)"
-        log("loaded host=\(hostAppBundleIdentifier) group=\(appGroupId)")
+        log("loaded host bundle id")
     }
     
     // MARK: - Attachment processing (clean RSI style, preserve FSI features)
+    //
+    // Residual: this layer cannot reject a share that comes from the host app
+    // itself. Items arrive as local file URLs with no source-provider authority,
+    // so the check has to happen in the host app's Dart layer.
     private func processAttachments() {
         guard let content = extensionContext?.inputItems.first as? NSExtensionItem else {
             completeAndExit()
@@ -310,7 +334,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             let filename = "File_\(UUID().uuidString)"
             if let dst = newShareDestination(named: filename) {
                 do {
-                    try raw.write(to: dst)
+                    try raw.write(to: dst, options: .completeFileProtection)
                     sharedMedia.append(SharingFile(value: dst.absoluteString, mimeType: "application/octet-stream", thumbnail: nil, duration: nil, type: .file))
                 } catch {
                     removeShareDirectory(of: dst)
@@ -327,7 +351,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
         guard let dst = newShareDestination(named: tempName) else { return nil }
         do {
             if let d = image.pngData() {
-                try d.write(to: dst)
+                try d.write(to: dst, options: .completeFileProtection)
                 return SharingFile(value: dst.absoluteString, mimeType: "image/png", thumbnail: nil, duration: nil, type: .image)
             }
         } catch {
@@ -352,12 +376,13 @@ open class FSIShareViewController: SLComposeServiceViewController {
     
     
     private func redirectToHostApp() {
-        // kept for compatibility (RSI style)
-        loadIds()
-        //        let raw = "\(kSchemePrefix)-\(hostAppBundleIdentifier):share"
-        let raw = "\(kSchemePrefix)-\(hostAppBundleIdentifier)://dataUrl=\(kUserDefaultsKey)"
-        guard let url = URL(string: raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? raw) else { completeAndExit(); return }
-        
+        // The bundle id is embedded in a URL scheme, so it is encoded with a
+        // strict character set first. Fail closed if encoding is impossible;
+        // never fall back to the raw id, which could inject separators.
+        guard let safeHost = Self.schemeSafeHost(hostAppBundleIdentifier),
+              let url = URL(string: "\(kSchemePrefix)-\(safeHost)://dataUrl=\(kUserDefaultsKey)")
+        else { completeAndExit(); return }
+
         var responder: UIResponder? = self
         if #available(iOS 18.0, *) {
             while responder != nil {
@@ -416,6 +441,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             log("newShareDestination error: \(error)")
             return nil
         }
+        stagedURLs.append(directory)
         return directory.appendingPathComponent(name)
     }
 
@@ -425,10 +451,25 @@ open class FSIShareViewController: SLComposeServiceViewController {
         try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
     }
 
+    /// Raises the data-protection class of a staged App Group file to
+    /// `.complete`, so the plaintext is unreadable while the device is locked
+    /// (the extension runs with the screen on; the host app reads on
+    /// foreground). Best-effort: a failure must not abort staging.
+    private func protect(_ url: URL) {
+        do {
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: url.path)
+        } catch {
+            log("protect() failed on a staged file: \(error.localizedDescription)")
+        }
+    }
+
     func copyFile(at srcURL: URL, to dstURL: URL) -> Bool {
         do {
             if FileManager.default.fileExists(atPath: dstURL.path) { try FileManager.default.removeItem(at: dstURL) }
             try FileManager.default.copyItem(at: srcURL, to: dstURL)
+            protect(dstURL)
             return true
         } catch {
             log("copyFile error: \(error)")
@@ -453,7 +494,11 @@ open class FSIShareViewController: SLComposeServiceViewController {
         do {
             let cg = try gen.copyCGImage(at: time, actualTime: nil)
             if let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.8) {
-                try data.write(to: thumbnailPath, options: .atomic)
+                // Protected like every staged file. The thumbnail is removed on
+                // cancel or error; on success the host app only learns the path
+                // through the payload, so it deletes it with `cleanup`.
+                try data.write(to: thumbnailPath, options: [.atomic, .completeFileProtection])
+                stagedURLs.append(thumbnailPath)
                 return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: thumbnailPath.absoluteString, duration: Int(duration), type: .video)
             }
         } catch {
@@ -481,6 +526,15 @@ open class FSIShareViewController: SLComposeServiceViewController {
         return directory.appendingPathComponent("\(UUID().uuidString).jpg")
     }
     
+    /// Percent-encodes a bundle identifier for use inside a URL scheme, keeping
+    /// only letters, digits, `.` and `-`. `.urlQueryAllowed` would leave `:` and
+    /// `/` untouched, which could inject scheme or authority separators. Returns
+    /// nil when the identifier cannot be encoded (for example a lone surrogate).
+    static func schemeSafeHost(_ bundleIdentifier: String) -> String? {
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-")
+        return bundleIdentifier.addingPercentEncoding(withAllowedCharacters: allowed)
+    }
+
     private func containerURL() -> URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)
     }
@@ -489,7 +543,24 @@ open class FSIShareViewController: SLComposeServiceViewController {
         extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
     }
     
+    /// Deletes everything this invocation staged. Used on cancel and error only;
+    /// on success the host app needs the files.
+    private func cleanupStagedFiles() {
+        Self.removeStagedItems(stagedURLs)
+        stagedURLs.removeAll()
+    }
+
+    /// Removes every staged item (per-share directories and thumbnails). An
+    /// item that is already gone is skipped. The URLs are ones this invocation
+    /// created, so the removal is recursive on purpose.
+    static func removeStagedItems(_ urls: [URL]) {
+        for url in urls {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     private func dismissWithError() {
+        cleanupStagedFiles()
         log("[ERROR] Error loading data!")
         let alert = UIAlertController(title: "Error", message: "Error loading data", preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .cancel) { _ in self.dismiss(animated: true, completion: nil) })
@@ -497,25 +568,25 @@ open class FSIShareViewController: SLComposeServiceViewController {
         extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
     }
     
-    private func writeTempFile(_ image: UIImage, to dstURL: URL) -> Bool {
-        do {
-            if FileManager.default.fileExists(atPath: dstURL.path) { try FileManager.default.removeItem(at: dstURL) }
-            let pngData = image.pngData()
-            try pngData?.write(to: dstURL)
-            return true
-        } catch (let error) {
-            log("writeTempFile error: \(error)")
-            return false
-        }
-    }
-    
+    // The UserDefaults(suiteName:) plist that carries the staged paths and MIME
+    // types has the OS default protection class (readable after first unlock).
+    // Instead of replacing this hand-off, the plugin deletes the keys the moment
+    // it reads them (FSI-95), which shortens the on-disk window to the hand-off
+    // itself, while the device is unlocked. The file contents are written with
+    // complete file protection. Residual: the plist is briefly at the default
+    // class during that window.
     private func saveToUserDefaults(data: [SharingFile]) {
         let ud = UserDefaults(suiteName: appGroupId)
         if let enc = try? JSONEncoder().encode(data) { ud?.set(enc, forKey: kUserDefaultsKey); ud?.synchronize() }
     }
     
     // MARK: - Logging
-    private func log(_ s: String) { if debugLogs { print("[FSIShareVC] \(s)") } }
+    // Compiled out of release builds entirely, not only gated by `debugLogs`.
+    private func log(_ s: String) {
+        #if DEBUG
+        if debugLogs { print("[FSIShareVC] \(s)") }
+        #endif
+    }
 
     // MARK: - Path safety
 
@@ -636,11 +707,13 @@ class SharingFile: Codable {
     // user-supplied filenames, MIME types, or thumbnail paths to the
     // system log via this helper. Preserves the API for development
     // use. Addresses R-SI-03 (see SECURITY_AUDIT.md).
-    func toString() {
-        #if DEBUG
+    // The whole declaration is DEBUG-only and private, so a release build cannot
+    // reach it even through a stray caller.
+    #if DEBUG
+    private func toString() {
         print("[SharingFile] \n\tvalue: \(self.value)\n\tthumbnail: \(self.thumbnail ?? "--" )\n\tduration: \(self.duration ?? 0)\n\ttype: \(self.type)\n\tmimeType: \(String(describing: self.mimeType))\n\tmessage: \(String(describing: self.message))")
-        #endif
     }
+    #endif
 }
 
 

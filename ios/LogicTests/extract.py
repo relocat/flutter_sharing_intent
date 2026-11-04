@@ -15,6 +15,12 @@ variant "nowiring": negative control. The isRegularFile guard is deleted from
 variant "noreal"  : negative control. The real-directory guard is deleted, so a
                     symlinked plugin root would redirect deletes.
 variant "noleaf"  : negative control. Any thumbnail leaf name is accepted.
+variant "noprotect": negative control. The protection option is removed from the
+                    staged writes before the source pins are computed.
+variant "nocancel": negative control. The cancel cleanup call is removed before
+                    the source pins are computed.
+variant "weakhost": negative control. The bundle id is encoded with .urlQueryAllowed.
+variant "nostagedcleanup": negative control. removeStagedItems does nothing.
 variant "rawstrip": negative control. file:// identifiers are converted by
                     textual stripping (no percent-decoding).
 variant "noscope" : negative control. The ownership guard is deleted from
@@ -98,6 +104,75 @@ elif variant == "noscope":
 with open(os.path.join(out, "ContainerGuard.swift"), "w") as f:
     f.write("import Foundation\n\npublic enum ContainerGuard {\n" + constants + "// BEGIN VERBATIM\n"
             + guard + regular + leaf + realdirs + owned + relative + emptydir + filepath + "    @discardableResult\n" + remover + "// END VERBATIM\n}\n")
+
+# Share-extension helpers (static functions of the controller class).
+a, b, schemehost = block(controller, "    static func schemeSafeHost(")
+report("schemeSafeHost", controller, a, b, schemehost)
+a, b, removestaged = block(controller, "    static func removeStagedItems(")
+report("removeStagedItems", controller, a, b, removestaged)
+if variant == "weakhost":
+    # Old behaviour: .urlQueryAllowed leaves ':' and '/' unencoded.
+    stripped = schemehost.replace("withAllowedCharacters: allowed)", "withAllowedCharacters: .urlQueryAllowed)")
+    assert stripped != schemehost, "charset use not found"
+    schemehost = stripped
+elif variant == "nostagedcleanup":
+    removestaged = "    static func removeStagedItems(_ urls: [URL]) {\n    }\n"
+with open(os.path.join(out, "ExtensionLogic.swift"), "w") as f:
+    f.write("import Foundation\n\npublic enum ExtensionLogic {\n// BEGIN VERBATIM\n" + schemehost + removestaged + "// END VERBATIM\n}\n")
+
+
+def func_text(text, start_prefix):
+    lines = text.split("\n")
+    start = next(i for i, l in enumerate(lines) if l.startswith(start_prefix))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "    }")
+    return "\n".join(lines[start:end + 1])
+
+
+def code_lines(text):
+    return [l for l in text.split("\n") if not l.strip().startswith("//")]
+
+
+# Source pins: facts about the controller that unit tests cannot reach because
+# it needs UIKit. Each is computed from the shipped source; the controls feed a
+# mutated copy of the source through the same scan.
+source = open(os.path.join(root, controller), encoding="utf-8").read()
+if variant == "noprotect":
+    mutated = source.replace(".completeFileProtection", ".atomic")
+    assert mutated != source, "protection option not found"
+    source = mutated
+elif variant == "nocancel":
+    block_text = func_text(source, "    open override func didSelectCancel(")
+    mutated = source.replace(block_text, block_text.replace("cleanupStagedFiles()", "// removed"))
+    assert mutated != source, "cancel cleanup not found"
+    source = mutated
+
+code = "\n".join(code_lines(source))
+writes = [l for l in code_lines(source) if ".write(to:" in l]
+copy_file = func_text(source, "    func copyFile(")
+cancel = func_text(source, "    open override func didSelectCancel(")
+dismiss = func_text(source, "    private func dismissWithError(")
+destination = func_text(source, "    func newShareDestination(")
+thumbnail = func_text(source, "    private func getSharedMediaFile(")
+redirect = func_text(source, "    private func redirectToHostApp(")
+logger = func_text(source, "    private func log(")
+pins = {
+    "everyDataWriteIsProtected": len(writes) >= 3 and all("completeFileProtection" in l for l in writes),
+    "copiedFilesAreProtected": "copyItem" in copy_file and "protect(dstURL)" in copy_file
+        and copy_file.index("copyItem") < copy_file.index("protect(dstURL)"),
+    "cancelCleansBeforeSuper": "cleanupStagedFiles()" in cancel and "super.didSelectCancel()" in cancel
+        and cancel.index("cleanupStagedFiles()") < cancel.index("super.didSelectCancel()"),
+    "errorPathCleans": "cleanupStagedFiles()" in dismiss,
+    "directoriesAreTracked": "stagedURLs.append(directory)" in destination,
+    "thumbnailsAreTracked": "stagedURLs.append(thumbnailPath)" in thumbnail,
+    "toStringIsPrivateAndDebugOnly": "#if DEBUG\n    private func toString()" in source,
+    "redirectFailsClosed": "schemeSafeHost(hostAppBundleIdentifier)" in redirect and "completeAndExit(); return" in redirect
+        and "\\(hostAppBundleIdentifier)" not in redirect,
+    "loggingIsCompiledOutOfReleaseBuilds": "#if DEBUG" in logger,
+}
+for name, value in pins.items():
+    print(f"pin {name} = {value}")
+with open(os.path.join(out, "SourcePins.swift"), "w") as f:
+    f.write("public enum SourcePins {\n" + "".join(f"    static let {n} = {'true' if v else 'false'}\n" for n, v in pins.items()) + "}\n")
 
 a, b, sanitizer = block(controller, "    private func sanitizedComponent(")
 report("sanitizedComponent", controller, a, b, sanitizer)
