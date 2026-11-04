@@ -41,4 +41,59 @@ final class ExtensionLogicTests: XCTestCase {
         XCTAssertFalse(fm.fileExists(atPath: shareDirectory.path))
         XCTAssertFalse(fm.fileExists(atPath: thumbnail.path))
     }
+
+    func testStagedSymlinkIsRemovedAsALinkAndItsTargetSurvives() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("fsi-staged-link-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: base) }
+        let outside = base.appendingPathComponent("outside", isDirectory: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        let precious = outside.appendingPathComponent("keep.txt")
+        try Data("x".utf8).write(to: precious)
+        let staged = base.appendingPathComponent("staged", isDirectory: true)
+        try fm.createDirectory(at: staged, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: staged.appendingPathComponent("link"), withDestinationURL: outside)
+
+        ExtensionLogic.removeStagedItems([staged])
+
+        XCTAssertFalse(fm.fileExists(atPath: staged.path))
+        XCTAssertTrue(fm.fileExists(atPath: precious.path), "a link inside a staged directory must not be followed")
+    }
+
+    func testUsableRootAcceptsMissingAndRealDirectoriesOnly() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("fsi-root-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        let realDirectory = base.appendingPathComponent("real", isDirectory: true)
+        try fm.createDirectory(at: realDirectory, withIntermediateDirectories: true)
+        let plainFile = base.appendingPathComponent("file")
+        try Data("x".utf8).write(to: plainFile)
+        let link = base.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: realDirectory)
+
+        XCTAssertTrue(ExtensionLogic.isUsableRoot(base.appendingPathComponent("missing")))
+        XCTAssertTrue(ExtensionLogic.isUsableRoot(realDirectory))
+        XCTAssertFalse(ExtensionLogic.isUsableRoot(plainFile))
+        XCTAssertFalse(ExtensionLogic.isUsableRoot(link), "a symlinked plugin directory must be refused")
+    }
+
+    func testOnlyRegularNonLinkFilesAreCopyable() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("fsi-copy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        let file = base.appendingPathComponent("a.txt")
+        try Data("x".utf8).write(to: file)
+        let directory = base.appendingPathComponent("dir", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let link = base.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: file)
+
+        XCTAssertTrue(ExtensionLogic.isCopyableRegularFile(file))
+        XCTAssertFalse(ExtensionLogic.isCopyableRegularFile(directory))
+        XCTAssertFalse(ExtensionLogic.isCopyableRegularFile(link))
+        XCTAssertFalse(ExtensionLogic.isCopyableRegularFile(base.appendingPathComponent("missing")))
+    }
 }
+

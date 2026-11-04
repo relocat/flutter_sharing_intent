@@ -6,11 +6,23 @@ import XCTest
 final class SourcePinTests: XCTestCase {
     func testEveryStagedDataWriteUsesCompleteFileProtection() { XCTAssertTrue(SourcePins.everyDataWriteIsProtected) }
     func testCopiedFilesAreProtectedAfterTheCopy() { XCTAssertTrue(SourcePins.copiedFilesAreProtected) }
-    func testCancelCleansStagedFilesBeforeTheBaseClass() { XCTAssertTrue(SourcePins.cancelCleansBeforeSuper) }
-    func testErrorPathCleansStagedFiles() { XCTAssertTrue(SourcePins.errorPathCleans) }
+    func testProtectFailsClosed() { XCTAssertTrue(SourcePins.protectFailsClosed) }
+    func testCopyRejectsNonRegularSources() { XCTAssertTrue(SourcePins.copyRejectsNonRegularSources) }
+    func testDirectoriesAreCreatedProtected() { XCTAssertTrue(SourcePins.directoriesAreCreatedProtected) }
+    func testRootsAreCheckedBeforeStaging() { XCTAssertTrue(SourcePins.rootsAreCheckedBeforeStaging) }
+    func testCancelAbortsBeforeTheBaseClass() { XCTAssertTrue(SourcePins.cancelAbortsBeforeSuper) }
+    func testErrorPathAborts() { XCTAssertTrue(SourcePins.errorPathAborts) }
+    func testErrorUiRunsOnMain() { XCTAssertTrue(SourcePins.errorUiRunsOnMain) }
+    func testAbortFlagIsSetBeforeCleanup() { XCTAssertTrue(SourcePins.abortFlagIsSetBeforeCleanup) }
+    func testNotifyDropsAnAbortedShare() { XCTAssertTrue(SourcePins.notifyDropsAnAbortedShare) }
+    func testHandlersRunOnTheStateQueue() { XCTAssertTrue(SourcePins.handlersRunOnTheStateQueue) }
+    func testSharedStateIsOnlyAccessedOnTheQueue() { XCTAssertTrue(SourcePins.sharedStateIsOnlyAccessedOnTheQueue) }
     func testPerShareDirectoriesAreTracked() { XCTAssertTrue(SourcePins.directoriesAreTracked) }
     func testThumbnailsAreTracked() { XCTAssertTrue(SourcePins.thumbnailsAreTracked) }
-    func testToStringIsPrivateAndDebugOnly() { XCTAssertTrue(SourcePins.toStringIsPrivateAndDebugOnly) }
+    func testRedirectIsComputedBeforeDefaultsAreWritten() { XCTAssertTrue(SourcePins.redirectIsComputedBeforeDefaultsAreWritten) }
+    func testRedirectFailureCleansUp() { XCTAssertTrue(SourcePins.redirectFailureCleansUp) }
     func testRedirectFailsClosedOnAnUnencodableBundleId() { XCTAssertTrue(SourcePins.redirectFailsClosed) }
+    func testEmptyResultCleansUp() { XCTAssertTrue(SourcePins.emptyResultCleansUp) }
+    func testToStringIsPrivateAndDebugOnly() { XCTAssertTrue(SourcePins.toStringIsPrivateAndDebugOnly) }
     func testLoggingIsCompiledOutOfReleaseBuilds() { XCTAssertTrue(SourcePins.loggingIsCompiledOutOfReleaseBuilds) }
 }

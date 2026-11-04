@@ -469,17 +469,29 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
 - The extension tracks everything it staged in one invocation (per-share directories and thumbnails) and
   deletes it on cancel and on error. On success the files are kept, because the host app reads them and then
   calls `cleanup`. This is in addition to the immediate removal of a directory whose write failed.
+- The tracked lists and the abort flag are only accessed on one serial queue, and load handlers run on that
+  queue. A cancel or error sets the abort flag before it deletes anything, so a load that finishes later
+  stages nothing, and a share that was cancelled or failed is never delivered. Nothing is staged and nothing
+  is left when no media results.
+- Per-share directories and the thumbnail directory are created with complete file protection, so content is
+  protected from the first byte; a file that cannot be protected is not shared. Only regular files (not
+  directories or symbolic links) are copied, because `cleanup` removes regular files only.
+- A symbolic link in place of the plugin directory or the thumbnail directory is refused before staging.
+- The redirect URL is computed before anything is written to the shared defaults; if it cannot be built the
+  extension deletes what it staged and exits.
 - A video thumbnail is written to `<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg`; the name is
   unique per thumbnail, and an existing file is never reused.
 - The bundle id embedded in the redirect URL is percent-encoded with a strict character set (letters,
   digits, `.`, `-`); if it cannot be encoded the extension exits instead of using the raw id.
-- A missing `AppGroupId` Info.plist key is logged, because a derived group id stops matching the
-  entitlement when the bundle id changes. The derived fallback itself is unchanged.
+- A missing `AppGroupId` Info.plist key prints a warning in debug builds, because a derived group id stops
+  matching the entitlement when the bundle id changes. The derived fallback itself is unchanged.
 - `toString` is private and compiled only in debug builds; the debug logger is compiled out of release builds
   and no longer logs the host or group identifiers.
 - The unused `writeTempFile` method was removed (R-SI-05).
 - Residuals: the extension cannot tell that a share comes from the host app itself, because items arrive as local
-  file URLs; the host app's Dart layer performs that check. The metadata plist of the App Group `UserDefaults`
+  file URLs; the host app must perform that check in its own layer. The metadata plist of the App Group `UserDefaults`
   keeps the OS default protection class; the plugin deletes it when read (FSI-95), which limits the window to the hand-off.
-- Verification: the encoding helper and the staged-item removal are unit-tested; the other guarantees are pinned from
-  the shipped source and each pin has a negative control.
+- Verification: the encoding helper, the staged-item removal (including that links are not followed), the root check
+  and the regular-file check are unit-tested; the other guarantees are pinned from the shipped source (data writes
+  are found as complete calls across lines, and `createFile` and `moveItem` are rejected), and each pin and test has a
+  negative control.

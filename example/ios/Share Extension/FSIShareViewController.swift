@@ -67,8 +67,11 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private(set) var hostAppBundleIdentifier: String = ""
     private(set) var appGroupId: String = ""
     
-    // Results
+    // Results. `sharedMedia`, `stagedURLs` and `isAborted` are touched from the
+    // main queue and from NSItemProvider callback queues, so ALL access goes
+    // through `stateQueue`.
     private var sharedMedia: [SharingFile] = []
+    private let stateQueue = DispatchQueue(label: "flutter_sharing_intent.share-state")
     
     // Debug
     private let debugLogs = false
@@ -78,6 +81,10 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// partially staged plaintext is left behind; on success it is kept, because
     /// the host app reads the files and deletes them afterwards.
     private var stagedURLs: [URL] = []
+
+    /// Set once the share was cancelled or failed. A load that finishes later
+    /// stages nothing, and the final notification delivers nothing.
+    private var isAborted = false
 
     // MARK: - Security constants
 
@@ -103,9 +110,9 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     open override func didSelectCancel() {
-        // The base class does not clean up: remove anything already staged
-        // before the standard cancel.
-        cleanupStagedFiles()
+        // The base class does not clean up: mark the share aborted FIRST, so
+        // loads still in flight stage nothing, then remove what is staged.
+        abortAndCleanup()
         super.didSelectCancel()
     }
 
@@ -114,14 +121,17 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     open override func didSelectPost() {
-        if self.sharedMedia.isEmpty {
+        if stateQueue.sync(execute: { self.sharedMedia.isEmpty }) {
             if let text = self.contentText, !text.isEmpty {
-                self.sharedMedia.append(
-                    SharingFile(value: text, thumbnail: nil, duration: nil, type: .text)
-                )
+                stateQueue.sync {
+                    self.sharedMedia.append(
+                        SharingFile(value: text, thumbnail: nil, duration: nil, type: .text)
+                    )
+                }
                 self.saveAndRedirect(message: text)
                 return
             }
+            cleanupStagedFiles()
             self.completeAndExit()
         } else {
             self.saveAndRedirect()
@@ -150,7 +160,9 @@ open class FSIShareViewController: SLComposeServiceViewController {
             // bundle id changes (for example under enterprise re-signing); the
             // container URL is then nil and shares would be dropped silently.
             // Declare the id explicitly with the Info.plist key to avoid that.
-            log("WARNING: Info.plist '\(kAppGroupIdKey)' missing; using derived app-group id")
+            #if DEBUG
+            print("[FSIShareVC] WARNING: Info.plist '\(kAppGroupIdKey)' missing; using derived app-group id")
+            #endif
         }
         appGroupId = custom ?? "group.\(hostAppBundleIdentifier)"
         log("loaded host bundle id")
@@ -181,7 +193,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 provider.loadItem(forTypeIdentifier: UType.image, options: nil) { [weak self] data, error in
                     defer { group.leave() }
                     guard let self = self, error == nil else { self?.dismissWithError(); return }
-                    self.handleImageItem(data: data, index: index, total: attachments.count)
+                    self.stageOnStateQueue { self.handleImageItem(data: data, index: index, total: attachments.count) }
                 }
                 continue
             }
@@ -190,7 +202,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 provider.loadItem(forTypeIdentifier: UType.movie, options: nil) { [weak self] data, error in
                     defer { group.leave() }
                     guard let self = self, error == nil else { self?.dismissWithError(); return }
-                    self.handleVideoItem(data: data, index: index, total: attachments.count)
+                    self.stageOnStateQueue { self.handleVideoItem(data: data, index: index, total: attachments.count) }
                 }
                 continue
             }
@@ -199,7 +211,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 provider.loadItem(forTypeIdentifier: UType.fileURL, options: nil) { [weak self] data, error in
                     defer { group.leave() }
                     guard let self = self, error == nil else { self?.dismissWithError(); return }
-                    self.handleFileItem(data: data, index: index, total: attachments.count)
+                    self.stageOnStateQueue { self.handleFileItem(data: data, index: index, total: attachments.count) }
                 }
                 continue
             }
@@ -208,7 +220,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 provider.loadItem(forTypeIdentifier: UType.url, options: nil) { [weak self] data, error in
                     defer { group.leave() }
                     guard let self = self, error == nil else { self?.dismissWithError(); return }
-                    self.handleUrlItem(data: data, index: index, total: attachments.count)
+                    self.stageOnStateQueue { self.handleUrlItem(data: data, index: index, total: attachments.count) }
                 }
                 continue
             }
@@ -220,7 +232,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 provider.loadItem(forTypeIdentifier: id, options: nil) { [weak self] data, error in
                     defer { group.leave() }
                     guard let self = self, error == nil else { self?.dismissWithError(); return }
-                    self.handleTextItem(data: data, index: index, total: attachments.count)
+                    self.stageOnStateQueue { self.handleTextItem(data: data, index: index, total: attachments.count) }
                 }
                 continue
             }
@@ -229,7 +241,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 provider.loadItem(forTypeIdentifier: UType.data, options: nil) { [weak self] data, error in
                     defer { group.leave() }
                     guard let self = self, error == nil else { self?.dismissWithError(); return }
-                    self.handleFileItem(data: data, index: index, total: attachments.count)
+                    self.stageOnStateQueue { self.handleFileItem(data: data, index: index, total: attachments.count) }
                 }
                 continue
             }
@@ -238,7 +250,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 provider.loadItem(forTypeIdentifier: UType.item, options: nil) { [weak self] data, error in
                     defer { group.leave() }
                     guard let self = self, error == nil else { self?.dismissWithError(); return }
-                    self.handleFileItem(data: data, index: index, total: attachments.count)
+                    self.stageOnStateQueue { self.handleFileItem(data: data, index: index, total: attachments.count) }
                 }
                 continue
             }
@@ -251,16 +263,32 @@ open class FSIShareViewController: SLComposeServiceViewController {
         
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
+            // A cancelled or failed share is never delivered.
+            if self.stateQueue.sync(execute: { self.isAborted }) {
+                self.cleanupStagedFiles()
+                return
+            }
             // if we have media -> media, else fallback to complete
-            if !self.sharedMedia.isEmpty {
+            if !self.stateQueue.sync(execute: { self.sharedMedia.isEmpty }) {
                 self.saveAndRedirect()
             } else {
                 self.log("No shared media → stopping.")
+                self.cleanupStagedFiles()
                 self.completeAndExit()
             }
         }
     }
-    
+
+    /// Runs one load handler on the state queue. Handlers stage files and append
+    /// to the shared lists, so they are serialised with cancel and error
+    /// handling; a handler that starts after an abort does nothing.
+    private func stageOnStateQueue(_ handler: () -> Void) {
+        stateQueue.sync {
+            if isAborted { return }
+            handler()
+        }
+    }
+
     // MARK: - Individual handlers (preserve FSI behavior)
     private func handleTextItem(data: NSSecureCoding?, index: Int, total: Int) {
         if let s = data as? String {
@@ -363,26 +391,35 @@ open class FSIShareViewController: SLComposeServiceViewController {
     
     
     private func saveAndRedirect(message: String? = nil) {
+        // The redirect URL is computed BEFORE anything is written to the shared
+        // defaults, so a failure leaves neither a payload nor staged files.
+        guard let url = redirectURL() else {
+            cleanupStagedFiles()
+            completeAndExit()
+            return
+        }
+        let media = stateQueue.sync { sharedMedia }
         let ud = UserDefaults(suiteName: appGroupId)
-        if !sharedMedia.isEmpty {
-            if let data = try? JSONEncoder().encode(sharedMedia) {
+        if !media.isEmpty {
+            if let data = try? JSONEncoder().encode(media) {
                 ud?.set(data, forKey: kUserDefaultsKey)
             }
         }
         ud?.set(message, forKey: kUserDefaultsMessageKey)
         ud?.synchronize()
-        redirectToHostApp()
+        redirectToHostApp(url)
     }
-    
-    
-    private func redirectToHostApp() {
-        // The bundle id is embedded in a URL scheme, so it is encoded with a
-        // strict character set first. Fail closed if encoding is impossible;
-        // never fall back to the raw id, which could inject separators.
-        guard let safeHost = Self.schemeSafeHost(hostAppBundleIdentifier),
-              let url = URL(string: "\(kSchemePrefix)-\(safeHost)://dataUrl=\(kUserDefaultsKey)")
-        else { completeAndExit(); return }
 
+    /// The URL that opens the host app. The bundle id is embedded in a URL
+    /// scheme, so it is encoded with a strict character set first. Returns nil
+    /// if encoding is impossible; the raw id is never used, because it could
+    /// inject separators.
+    private func redirectURL() -> URL? {
+        guard let safeHost = Self.schemeSafeHost(hostAppBundleIdentifier) else { return nil }
+        return URL(string: "\(kSchemePrefix)-\(safeHost)://dataUrl=\(kUserDefaultsKey)")
+    }
+
+    private func redirectToHostApp(_ url: URL) {
         var responder: UIResponder? = self
         if #available(iOS 18.0, *) {
             while responder != nil {
@@ -432,17 +469,42 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// so the host app's cleanup can remove exactly what the plugin wrote.
     func newShareDestination(named name: String) -> URL? {
         guard let container = containerURL() else { return nil }
-        let directory = container
-            .appendingPathComponent(Self.kShareRootName, isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let root = container.appendingPathComponent(Self.kShareRootName, isDirectory: true)
+        // A symbolic link in place of the plugin directory is refused: staging
+        // through it would write outside the container.
+        guard Self.isUsableRoot(root) else {
+            log("newShareDestination: plugin directory is not a real directory")
+            return nil
+        }
+        let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            // Complete protection from the first byte: files created inside
+            // inherit the directory's class.
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.protectionKey: FileProtectionType.complete])
         } catch {
             log("newShareDestination error: \(error)")
             return nil
         }
         stagedURLs.append(directory)
         return directory.appendingPathComponent(name)
+    }
+
+    /// True if `url` is missing (it will be created) or a real directory by
+    /// `lstat`; false for a symbolic link or any other file type.
+    static func isUsableRoot(_ url: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return true }
+        return (attributes[.type] as? FileAttributeType) == .typeDirectory
+    }
+
+    /// True only for a regular file that is not a symbolic link. Directories and
+    /// links are never copied: the plugin's cleanup removes regular files only,
+    /// so a copied directory or link would be left behind.
+    static func isCopyableRegularFile(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { return false }
+        return values.isRegularFile == true && values.isSymbolicLink != true
     }
 
     /// Removes the per-share directory that `fileURL` was meant to live in
@@ -454,22 +516,24 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// Raises the data-protection class of a staged App Group file to
     /// `.complete`, so the plaintext is unreadable while the device is locked
     /// (the extension runs with the screen on; the host app reads on
-    /// foreground). Best-effort: a failure must not abort staging.
-    private func protect(_ url: URL) {
-        do {
-            try FileManager.default.setAttributes(
-                [.protectionKey: FileProtectionType.complete],
-                ofItemAtPath: url.path)
-        } catch {
-            log("protect() failed on a staged file: \(error.localizedDescription)")
-        }
+    /// foreground). Throws on failure: a file that cannot be protected is not
+    /// shared.
+    private func protect(_ url: URL) throws {
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: url.path)
     }
 
     func copyFile(at srcURL: URL, to dstURL: URL) -> Bool {
+        guard Self.isCopyableRegularFile(srcURL) else {
+            log("copyFile: source is not a regular file")
+            removeShareDirectory(of: dstURL)
+            return false
+        }
         do {
             if FileManager.default.fileExists(atPath: dstURL.path) { try FileManager.default.removeItem(at: dstURL) }
             try FileManager.default.copyItem(at: srcURL, to: dstURL)
-            protect(dstURL)
+            try protect(dstURL)
             return true
         } catch {
             log("copyFile error: \(error)")
@@ -517,15 +581,22 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private func newThumbnailPath() -> URL? {
         guard let container = containerURL() else { return nil }
         let directory = container.appendingPathComponent(Self.kThumbnailRootName, isDirectory: true)
+        guard Self.isUsableRoot(directory) else {
+            log("newThumbnailPath: thumbnail directory is not a real directory")
+            return nil
+        }
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.protectionKey: FileProtectionType.complete])
         } catch {
             log("newThumbnailPath error: \(error)")
             return nil
         }
         return directory.appendingPathComponent("\(UUID().uuidString).jpg")
     }
-    
+
     /// Percent-encodes a bundle identifier for use inside a URL scheme, keeping
     /// only letters, digits, `.` and `-`. `.urlQueryAllowed` would leave `:` and
     /// `/` untouched, which could inject scheme or authority separators. Returns
@@ -543,16 +614,34 @@ open class FSIShareViewController: SLComposeServiceViewController {
         extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
     }
     
-    /// Deletes everything this invocation staged. Used on cancel and error only;
-    /// on success the host app needs the files.
+    /// Deletes everything this invocation staged. Used on cancel, error and
+    /// when nothing is delivered; on success the host app needs the files.
     private func cleanupStagedFiles() {
-        Self.removeStagedItems(stagedURLs)
-        stagedURLs.removeAll()
+        stateQueue.sync {
+            Self.removeStagedItems(stagedURLs)
+            stagedURLs.removeAll()
+        }
+    }
+
+    /// Marks the share aborted, THEN deletes everything staged. Because loads
+    /// run their handlers on the same queue, a load either finished before this
+    /// (its files are deleted here) or starts after it (and stages nothing).
+    /// Returns false if the share was already aborted.
+    @discardableResult
+    private func abortAndCleanup() -> Bool {
+        return stateQueue.sync {
+            let isFirstAbort = !isAborted
+            isAborted = true
+            Self.removeStagedItems(stagedURLs)
+            stagedURLs.removeAll()
+            return isFirstAbort
+        }
     }
 
     /// Removes every staged item (per-share directories and thumbnails). An
     /// item that is already gone is skipped. The URLs are ones this invocation
-    /// created, so the removal is recursive on purpose.
+    /// created, so the removal is recursive on purpose; symbolic links inside
+    /// are removed as links and never followed.
     static func removeStagedItems(_ urls: [URL]) {
         for url in urls {
             try? FileManager.default.removeItem(at: url)
@@ -560,12 +649,14 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
 
     private func dismissWithError() {
-        cleanupStagedFiles()
+        guard abortAndCleanup() else { return }
         log("[ERROR] Error loading data!")
-        let alert = UIAlertController(title: "Error", message: "Error loading data", preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .cancel) { _ in self.dismiss(animated: true, completion: nil) })
-        present(alert, animated: true, completion: nil)
-        extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+        DispatchQueue.main.async {
+            let alert = UIAlertController(title: "Error", message: "Error loading data", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .cancel) { _ in self.dismiss(animated: true, completion: nil) })
+            self.present(alert, animated: true, completion: nil)
+            self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+        }
     }
     
     // The UserDefaults(suiteName:) plist that carries the staged paths and MIME
@@ -703,12 +794,9 @@ class SharingFile: Codable {
     
     // Debug method to print out SharedMediaFile details in the console.
     //
-    // Body wrapped in #if DEBUG so production builds cannot leak
-    // user-supplied filenames, MIME types, or thumbnail paths to the
-    // system log via this helper. Preserves the API for development
-    // use. Addresses R-SI-03 (see SECURITY_AUDIT.md).
     // The whole declaration is DEBUG-only and private, so a release build cannot
-    // reach it even through a stray caller.
+    // leak file names, MIME types or thumbnail paths through it, even via a stray
+    // caller (R-SI-03, see SECURITY_AUDIT.md).
     #if DEBUG
     private func toString() {
         print("[SharingFile] \n\tvalue: \(self.value)\n\tthumbnail: \(self.thumbnail ?? "--" )\n\tduration: \(self.duration ?? 0)\n\ttype: \(self.type)\n\tmimeType: \(String(describing: self.mimeType))\n\tmessage: \(String(describing: self.message))")
