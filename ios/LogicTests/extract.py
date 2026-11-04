@@ -9,10 +9,14 @@ file holds the block between BEGIN/END markers so the copy can be re-hashed.
 
 variant "new"     : the shipped functions.
 variant "control" : negative control. isRegularFile is replaced by a stub that
-                    accepts everything (the behaviour before FSI-103), so the
-                    regular-file tests must fail.
+                    accepts everything (the behaviour before FSI-103).
+variant "nowiring": negative control. The isRegularFile guard is deleted from
+                    removeOwnedFiles (the wiring), so the wiring tests must fail.
+variant "noscope" : negative control. The ownership guard is deleted from
+                    removeOwnedFiles, so files outside the plugin layout would
+                    be removed and the scope tests must fail.
 """
-import hashlib, os, sys
+import hashlib, os, re, sys
 
 root, out, variant = sys.argv[1:4]
 plugin = "ios/Classes/SwiftFlutterSharingIntentPlugin.swift"
@@ -26,6 +30,11 @@ def block(path, start_prefix):
     return start + 1, end + 1, "\n".join(lines[start:end + 1]) + "\n"
 
 
+def line(path, prefix):
+    text = open(os.path.join(root, path), encoding="utf-8").read().split("\n")
+    return next(l for l in text if l.startswith(prefix))
+
+
 def report(name, path, first, last, text):
     print(f"{name}: {path} lines {first}-{last} sha256={hashlib.sha256(text.encode()).hexdigest()}")
 
@@ -36,10 +45,35 @@ a, b, guard = block(plugin, "    static func isStrictlyInsideContainer(")
 report("isStrictlyInsideContainer", plugin, a, b, guard)
 a, b, regular = block(plugin, "    static func isRegularFile(")
 report("isRegularFile", plugin, a, b, regular)
+a, b, owned = block(plugin, "    static func isPluginOwnedPath(")
+report("isPluginOwnedPath", plugin, a, b, owned)
+a, b, relative = block(plugin, "    static func relativeComponents(")
+report("relativeComponents", plugin, a, b, relative)
+a, b, emptydir = block(plugin, "    static func removeEmptyShareDirectory(")
+report("removeEmptyShareDirectory", plugin, a, b, emptydir)
+a, b, remover = block(plugin, "    static func removeOwnedFiles(")
+report("removeOwnedFiles", plugin, a, b, remover)
+constants = "".join(line(plugin, prefix) + "\n" for prefix in ("    static let kShareRootName", "    static let kThumbnailRootName"))
+
+# Wiring pin: the plugin's cleanupFiles must delegate to the extracted function.
+assert "Self.removeOwnedFiles(paths: paths, containerURL: groupUrl)" in open(os.path.join(root, plugin), encoding="utf-8").read(), \
+    "cleanupFiles no longer calls removeOwnedFiles"
+
 if variant == "control":
     regular = "    static func isRegularFile(atPath path: String) -> Bool {\n        return true\n    }\n"
+elif variant == "nowiring":
+    # Delete the isRegularFile guard from removeOwnedFiles.
+    stripped = re.sub(r"            guard Self\.isRegularFile\(atPath: p\) else \{\n.*?\n            \}\n", "", remover, count=1, flags=re.S)
+    assert stripped != remover, "isRegularFile guard not found"
+    remover = stripped
+elif variant == "noscope":
+    # Delete the ownership guard from removeOwnedFiles.
+    stripped = re.sub(r"            guard Self\.isPluginOwnedPath\(path: p, containerURL: containerURL\) else \{\n.*?\n            \}\n", "", remover, count=1, flags=re.S)
+    assert stripped != remover, "ownership guard not found"
+    remover = stripped
 with open(os.path.join(out, "ContainerGuard.swift"), "w") as f:
-    f.write("import Foundation\n\npublic enum ContainerGuard {\n// BEGIN VERBATIM\n" + guard + regular + "// END VERBATIM\n}\n")
+    f.write("import Foundation\n\npublic enum ContainerGuard {\n" + constants + "// BEGIN VERBATIM\n"
+            + guard + regular + owned + relative + emptydir + "    @discardableResult\n" + remover + "// END VERBATIM\n}\n")
 
 a, b, sanitizer = block(controller, "    private func sanitizedComponent(")
 report("sanitizedComponent", controller, a, b, sanitizer)

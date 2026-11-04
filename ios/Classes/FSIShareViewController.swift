@@ -79,6 +79,16 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// Mirrors the Android plugin cap (16 MiB). Prevents a malicious source app from
     /// exhausting the App Group container storage via an unbounded Data blob.
     private static let kMaxRawDataBytes = 16 * 1024 * 1024
+
+    /// App Group container directory that holds one sub-directory per shared
+    /// item, `<container>/flutter_sharing_intent/<UUID>/<name>` (FSI-105).
+    /// Must match `SwiftFlutterSharingIntentPlugin.kShareRootName`: the plugin
+    /// deletes only files of this shape.
+    static let kShareRootName = "flutter_sharing_intent"
+
+    /// App Group container directory for generated video thumbnails,
+    /// `<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg` (FSI-105).
+    static let kThumbnailRootName = "flutter_sharing_intent_thumbnails"
     
     // MARK: - Lifecycle
     open override func viewDidLoad() {
@@ -250,7 +260,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
         // data can be URL, UIImage, or Data
         if let url = data as? URL {
             let filename = getFileName(from: url, type: .image)
-            if let dst = containerURL()?.appendingPathComponent(filename) {
+            if let dst = newShareDestination(named: filename) {
                 if copyFile(at: url, to: dst) {
                     sharedMedia.append(SharingFile(value: dst.absoluteString, mimeType: url.mimeType(), thumbnail: nil, duration: nil, type: .image))
                 }
@@ -270,7 +280,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private func handleVideoItem(data: NSSecureCoding?, index: Int, total: Int) {
         if let url = data as? URL {
             let filename = getFileName(from: url, type: .video)
-            if let dst = containerURL()?.appendingPathComponent(filename) {
+            if let dst = newShareDestination(named: filename) {
                 if copyFile(at: url, to: dst) {
                     if let m = getSharedMediaFile(forVideo: dst) {
                         sharedMedia.append(m)
@@ -284,7 +294,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private func handleFileItem(data: NSSecureCoding?, index: Int, total: Int) {
         if let url = data as? URL {
             let filename = getFileName(from: url, type: .file)
-            if let dst = containerURL()?.appendingPathComponent(filename) {
+            if let dst = newShareDestination(named: filename) {
                 if copyFile(at: url, to: dst) {
                     sharedMedia.append(SharingFile(value: dst.absoluteString, mimeType: url.mimeType(), thumbnail: nil, duration: nil, type: .file))
                 }
@@ -298,11 +308,13 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 return
             }
             let filename = "File_\(UUID().uuidString)"
-            if let dst = containerURL()?.appendingPathComponent(filename) {
+            if let dst = newShareDestination(named: filename) {
                 do {
                     try raw.write(to: dst)
                     sharedMedia.append(SharingFile(value: dst.absoluteString, mimeType: "application/octet-stream", thumbnail: nil, duration: nil, type: .file))
-                } catch {}
+                } catch {
+                    removeShareDirectory(of: dst)
+                }
             }
         }
         
@@ -311,9 +323,8 @@ open class FSIShareViewController: SLComposeServiceViewController {
     
     // MARK: - Helpers: write temp image
     private func writeTempImage(_ image: UIImage) -> SharingFile? {
-        guard let container = containerURL() else { return nil }
         let tempName = "TempImage_\(UUID().uuidString).png"
-        let dst = container.appendingPathComponent(tempName)
+        guard let dst = newShareDestination(named: tempName) else { return nil }
         do {
             if let d = image.pngData() {
                 try d.write(to: dst)
@@ -323,6 +334,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
         } catch {
             log("writeTempImage error: \(error)")
         }
+        removeShareDirectory(of: dst)
         return nil
     }
     
@@ -390,6 +402,30 @@ open class FSIShareViewController: SLComposeServiceViewController {
         return sanitizedComponent(raw)
     }
     
+    /// Creates a fresh per-share directory,
+    /// `<container>/flutter_sharing_intent/<UUID>/`, and returns the URL of
+    /// `name` inside it (FSI-105). Every shared item gets its own directory,
+    /// so the host app's cleanup can remove exactly what the plugin wrote.
+    func newShareDestination(named name: String) -> URL? {
+        guard let container = containerURL() else { return nil }
+        let directory = container
+            .appendingPathComponent(Self.kShareRootName, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            log("newShareDestination error: \(error)")
+            return nil
+        }
+        return directory.appendingPathComponent(name)
+    }
+
+    /// Removes the per-share directory that `fileURL` was meant to live in
+    /// after a failed write, so a failed share leaves nothing behind.
+    private func removeShareDirectory(of fileURL: URL) {
+        try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+    }
+
     func copyFile(at srcURL: URL, to dstURL: URL) -> Bool {
         do {
             if FileManager.default.fileExists(atPath: dstURL.path) { try FileManager.default.removeItem(at: dstURL) }
@@ -397,6 +433,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             return true
         } catch {
             log("copyFile error: \(error)")
+            removeShareDirectory(of: dstURL)
             return false
         }
     }
@@ -404,12 +441,10 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private func getSharedMediaFile(forVideo: URL) -> SharingFile? {
         let asset = AVAsset(url: forVideo)
         let duration = (CMTimeGetSeconds(asset.duration) * 1000).rounded()
-        let thumbnailPath = getThumbnailPath(for: forVideo)
-        
-        if FileManager.default.fileExists(atPath: thumbnailPath.path) {
-            return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: thumbnailPath.absoluteString, duration: Int(duration), type: .video)
+        guard let thumbnailPath = newThumbnailPath() else {
+            return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: nil, duration: Int(duration), type: .video)
         }
-        
+
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
         gen.maximumSize = CGSize(width: 360, height: 360)
@@ -430,10 +465,19 @@ open class FSIShareViewController: SLComposeServiceViewController {
         return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: nil, duration: Int(duration), type: .video)
     }
     
-    private func getThumbnailPath(for url: URL) -> URL {
-        guard let container = containerURL() else { fatalError("App group not configured or missing") }
-        let fileName = Data(url.lastPathComponent.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")
-        return container.appendingPathComponent("\(fileName).jpg")
+    /// Returns a fresh `<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg`
+    /// URL, creating the thumbnail root if needed (FSI-105). Returns nil when
+    /// the root cannot be created; the video is then shared without a thumbnail.
+    private func newThumbnailPath() -> URL? {
+        guard let container = containerURL() else { return nil }
+        let directory = container.appendingPathComponent(Self.kThumbnailRootName, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            log("newThumbnailPath error: \(error)")
+            return nil
+        }
+        return directory.appendingPathComponent("\(UUID().uuidString).jpg")
     }
     
     private func containerURL() -> URL? {

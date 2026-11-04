@@ -204,29 +204,47 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: resolvedAppGroupId())
     }
 
-    /// Deletes shared-file copies from the App Group container after the host
-    /// app has processed them (FSI-31). Best-effort: per-file errors are logged
-    /// and swallowed; the method never throws back to Dart. A path is deleted
-    /// only if `isStrictlyInsideContainer` accepts it and it names a regular
-    /// file (`isRegularFile`); every other path is refused.
+    /// Deletes shared-file copies after the host app has processed them
+    /// (FSI-31). Best-effort: per-file errors are logged and swallowed; the
+    /// method never throws back to Dart. The work is done by
+    /// `removeOwnedFiles`, which is the unit the logic tests exercise.
     private func cleanupFiles(paths: [String]) {
         guard let groupUrl = self.appGroupContainerURL() else {
             NSLog("[FSI] cleanup: no App Group container URL available")
             return
         }
+        Self.removeOwnedFiles(paths: paths, containerURL: groupUrl)
+    }
+
+    /// Directory below the App Group container that holds one sub-directory
+    /// per shared item (`<container>/flutter_sharing_intent/<UUID>/<name>`).
+    /// Must match `FSIShareViewController.kShareRootName` (the share extension
+    /// is a separate target and cannot link this file).
+    static let kShareRootName = "flutter_sharing_intent"
+
+    /// Directory below the App Group container that holds generated video
+    /// thumbnails (`<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg`).
+    static let kThumbnailRootName = "flutter_sharing_intent_thumbnails"
+
+    /// Removes each path that is a regular file owned by this plugin and
+    /// strictly inside `containerURL` (FSI-31, FSI-103, FSI-105). Every other
+    /// path is refused, so a caller cannot make the plugin delete a directory,
+    /// a symbolic link, or any file it did not write. After a share file is
+    /// removed, its now-empty per-share directory is removed too.
+    @discardableResult
+    static func removeOwnedFiles(paths: [String], containerURL: URL) -> Int {
         let fm = FileManager.default
+        var removedCount = 0
         for p in paths {
-            // SECURITY: only delete below our App Group container (FSI-31).
-            // Defends against a caller passing paths outside the container,
-            // which could otherwise trick the plugin into deleting arbitrary
-            // files the host app can write to.
-            guard Self.isStrictlyInsideContainer(path: p, containerURL: groupUrl) else {
+            // SECURITY: only delete the plugin's own files below the App Group
+            // container (FSI-31, FSI-105).
+            guard Self.isPluginOwnedPath(path: p, containerURL: containerURL) else {
                 // Path intentionally omitted from the release log: it carries
                 // App Group container / share-filename metadata (zero-knowledge).
                 #if DEBUG
-                NSLog("[FSI] cleanup: refusing to delete outside container: \(p)")
+                NSLog("[FSI] cleanup: refusing to delete a path the plugin does not own: \(p)")
                 #else
-                NSLog("[FSI] cleanup: refusing to delete path outside container")
+                NSLog("[FSI] cleanup: refusing to delete a path the plugin does not own")
                 #endif
                 continue
             }
@@ -239,6 +257,8 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
             }
             do {
                 try fm.removeItem(atPath: p)
+                removedCount += 1
+                Self.removeEmptyShareDirectory(containing: p, containerURL: containerURL)
             } catch {
                 #if DEBUG
                 NSLog("[FSI] cleanup failed for \(p): \(error.localizedDescription)")
@@ -247,8 +267,49 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                 #endif
             }
         }
+        return removedCount
     }
-    
+
+    /// Returns true only if `path` has the exact shape the share extension
+    /// writes (FSI-105), strictly inside the container:
+    /// `<container>/flutter_sharing_intent/<UUID>/<file>` or
+    /// `<container>/flutter_sharing_intent_thumbnails/<file>`. Files at the
+    /// container root, deeper paths and other directories are not owned.
+    static func isPluginOwnedPath(path: String, containerURL: URL) -> Bool {
+        guard let relative = relativeComponents(path: path, containerURL: containerURL) else { return false }
+        switch relative.count {
+        case 2:
+            return relative[0] == kThumbnailRootName
+        case 3:
+            return relative[0] == kShareRootName && UUID(uuidString: relative[1]) != nil
+        default:
+            return false
+        }
+    }
+
+    /// The path components of `path` below the container, or nil when the path
+    /// is not strictly inside it (see `isStrictlyInsideContainer`).
+    static func relativeComponents(path: String, containerURL: URL) -> [String]? {
+        guard isStrictlyInsideContainer(path: path, containerURL: containerURL) else { return nil }
+        let candidate = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        return Array(candidate.dropFirst(containerURL.standardizedFileURL.pathComponents.count))
+    }
+
+    /// Removes the per-share directory that held the just-deleted share file,
+    /// but only when it is an empty directory of the owned shape. Thumbnail
+    /// files have no per-share directory, so nothing happens for them.
+    static func removeEmptyShareDirectory(containing path: String, containerURL: URL) {
+        guard isPluginOwnedPath(path: path, containerURL: containerURL),
+              let relative = relativeComponents(path: path, containerURL: containerURL),
+              relative.count == 3 else { return }
+        let directory = (path as NSString).deletingLastPathComponent
+        let fm = FileManager.default
+        guard let attributes = try? fm.attributesOfItem(atPath: directory),
+              (attributes[.type] as? FileAttributeType) == .typeDirectory,
+              (try? fm.contentsOfDirectory(atPath: directory))?.isEmpty == true else { return }
+        try? fm.removeItem(atPath: directory)
+    }
+
     /// Returns true only if `path` names an item strictly below `containerURL`
     /// (FSI-31 cleanup guard). The check is lexical and fails closed:
     ///
