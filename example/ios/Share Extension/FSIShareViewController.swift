@@ -67,9 +67,10 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private(set) var hostAppBundleIdentifier: String = ""
     private(set) var appGroupId: String = ""
     
-    // Results. `sharedMedia`, `stagedURLs` and `isAborted` are touched from the
+    // Results. `sharedMedia`, `stagedURLs` and `isFinished` are touched from the
     // main queue and from NSItemProvider callback queues, so ALL access goes
-    // through `stateQueue`.
+    // through `stateQueue`. The abort and completion flags are different: they
+    // sit behind a small lock, so Cancel never waits for a copy that is running.
     private var sharedMedia: [SharingFile] = []
     private let stateQueue = DispatchQueue(label: "flutter_sharing_intent.share-state")
     
@@ -82,9 +83,26 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// the host app reads the files and deletes them afterwards.
     private var stagedURLs: [URL] = []
 
-    /// Set once the share was cancelled or failed. A load that finishes later
-    /// stages nothing, and the final notification delivers nothing.
-    private var isAborted = false
+    /// Set (on `stateQueue`) when delivery was decided. Together with the abort
+    /// flag it makes delivery ONE atomic decision: a share is handed to the host
+    /// app at most once, and never after a cancel or error.
+    private var isFinished = false
+
+    /// Flags behind `flagLock`: the share was cancelled or failed (a load that
+    /// finishes later stages nothing, and nothing is delivered), and the
+    /// extension request was already completed (it is completed at most once).
+    private let flagLock = NSLock()
+    private var abortedFlag = false
+    private var completedFlag = false
+
+    /// Main-queue only: true once every load finished (or failed). Post is not
+    /// valid before that, so a Post can only deliver a complete, settled set.
+    private var hasSettledLoads = false
+
+    /// Longest time Cancel waits for the cleanup of staged files. A copy that
+    /// is still running is not waited for: it removes its own files when it
+    /// notices the abort.
+    private static let kCancelCleanupWaitSeconds = 2.0
 
     // MARK: - Security constants
 
@@ -117,18 +135,16 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
 
     open override func isContentValid() -> Bool {
-        return true
+        // Post is only allowed once all loads settled; see `hasSettledLoads`.
+        return hasSettledLoads
     }
     
     open override func didSelectPost() {
-        if stateQueue.sync(execute: { self.sharedMedia.isEmpty }) {
+        let isEmpty = stateQueue.sync(execute: { self.sharedMedia.isEmpty })
+        if isEmpty {
             if let text = self.contentText, !text.isEmpty {
-                stateQueue.sync {
-                    self.sharedMedia.append(
-                        SharingFile(value: text, thumbnail: nil, duration: nil, type: .text)
-                    )
-                }
-                self.saveAndRedirect(message: text)
+                let textFile = SharingFile(value: text, thumbnail: nil, duration: nil, type: .text)
+                self.saveAndRedirect(message: text, appending: textFile)
                 return
             }
             cleanupStagedFiles()
@@ -136,8 +152,6 @@ open class FSIShareViewController: SLComposeServiceViewController {
         } else {
             self.saveAndRedirect()
         }
-        // If the UI Post is used, save and redirect using contentText
-//        saveAndRedirect(message: contentText)
     }
     
     open override func viewDidAppear(_ animated: Bool) {
@@ -263,8 +277,10 @@ open class FSIShareViewController: SLComposeServiceViewController {
         
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
+            self.hasSettledLoads = true
+            self.validateContent()
             // A cancelled or failed share is never delivered.
-            if self.stateQueue.sync(execute: { self.isAborted }) {
+            if self.isAbortedNow {
                 self.cleanupStagedFiles()
                 return
             }
@@ -280,12 +296,21 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
 
     /// Runs one load handler on the state queue. Handlers stage files and append
-    /// to the shared lists, so they are serialised with cancel and error
-    /// handling; a handler that starts after an abort does nothing.
+    /// to the shared lists, so they are serialised with delivery; a handler that
+    /// starts after an abort, or after delivery, does nothing. If the share was
+    /// aborted while the handler was copying, everything the handler staged is
+    /// removed again before it returns.
     private func stageOnStateQueue(_ handler: () -> Void) {
         stateQueue.sync {
-            if isAborted { return }
+            if isAbortedNow || isFinished { return }
+            let stagedBefore = stagedURLs.count
+            let mediaBefore = sharedMedia.count
             handler()
+            if isAbortedNow {
+                Self.removeStagedItems(Array(stagedURLs[stagedBefore...]))
+                stagedURLs.removeSubrange(stagedBefore...)
+                sharedMedia.removeSubrange(mediaBefore...)
+            }
         }
     }
 
@@ -390,7 +415,39 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     
-    private func saveAndRedirect(message: String? = nil) {
+    /// What the single delivery decision produced.
+    private enum Delivery {
+        case deliver([SharingFile])
+        case drop
+        case alreadyDelivered
+    }
+
+    /// The ONE place where delivery is decided, atomically on the state queue:
+    /// a share that was aborted is dropped, a share that was already delivered
+    /// is left alone, and otherwise the share is marked finished and its media
+    /// returned (with `textFile` appended for a text-only Post).
+    private func decideDelivery(appending textFile: SharingFile?) -> Delivery {
+        return stateQueue.sync { () -> Delivery in
+            if isFinished { return .alreadyDelivered }
+            isFinished = true
+            guard !isAbortedNow else { return .drop }
+            if let textFile = textFile { sharedMedia.append(textFile) }
+            return .deliver(sharedMedia)
+        }
+    }
+
+    private func saveAndRedirect(message: String? = nil, appending textFile: SharingFile? = nil) {
+        let media: [SharingFile]
+        switch decideDelivery(appending: textFile) {
+        case .alreadyDelivered:
+            return
+        case .drop:
+            cleanupStagedFiles()
+            completeAndExit()
+            return
+        case .deliver(let delivered):
+            media = delivered
+        }
         // The redirect URL is computed BEFORE anything is written to the shared
         // defaults, so a failure leaves neither a payload nor staged files.
         guard let url = redirectURL() else {
@@ -398,15 +455,21 @@ open class FSIShareViewController: SLComposeServiceViewController {
             completeAndExit()
             return
         }
-        let media = stateQueue.sync { sharedMedia }
-        let ud = UserDefaults(suiteName: appGroupId)
-        if !media.isEmpty {
-            if let data = try? JSONEncoder().encode(media) {
-                ud?.set(data, forKey: kUserDefaultsKey)
-            }
+        guard let ud = UserDefaults(suiteName: appGroupId) else {
+            cleanupStagedFiles()
+            completeAndExit()
+            return
         }
-        ud?.set(message, forKey: kUserDefaultsMessageKey)
-        ud?.synchronize()
+        if !media.isEmpty {
+            guard let data = try? JSONEncoder().encode(media) else {
+                cleanupStagedFiles()
+                completeAndExit()
+                return
+            }
+            ud.set(data, forKey: kUserDefaultsKey)
+        }
+        ud.set(message, forKey: kUserDefaultsMessageKey)
+        ud.synchronize()
         redirectToHostApp(url)
     }
 
@@ -433,7 +496,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
                 responder = responder?.next
             }
         }
-        extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+        completeRequestOnce()
     }
     
     // MARK: - File / thumbnail / metadata helpers
@@ -468,6 +531,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// `name` inside it (FSI-105). Every shared item gets its own directory,
     /// so the host app's cleanup can remove exactly what the plugin wrote.
     func newShareDestination(named name: String) -> URL? {
+        dispatchPrecondition(condition: .onQueue(stateQueue))
         guard let container = containerURL() else { return nil }
         let root = container.appendingPathComponent(Self.kShareRootName, isDirectory: true)
         // A symbolic link in place of the plugin directory is refused: staging
@@ -478,8 +542,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
         }
         let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
-            // Complete protection from the first byte: files created inside
-            // inherit the directory's class.
+            // Files created inside inherit the directory's protection class.
             try FileManager.default.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true,
@@ -492,11 +555,28 @@ open class FSIShareViewController: SLComposeServiceViewController {
         return directory.appendingPathComponent(name)
     }
 
-    /// True if `url` is missing (it will be created) or a real directory by
-    /// `lstat`; false for a symbolic link or any other file type.
+    /// True only if `url` does not exist (it will be created) or is a real
+    /// directory by `lstat`. A symbolic link, any other file type, and ANY error
+    /// other than "no such file" (for example a permission error) give false.
     static func isUsableRoot(_ url: URL) -> Bool {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return true }
-        return (attributes[.type] as? FileAttributeType) == .typeDirectory
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            return (attributes[.type] as? FileAttributeType) == .typeDirectory
+        } catch {
+            let nsError = error as NSError
+            let isCocoaMissing = nsError.domain == NSCocoaErrorDomain
+                && (nsError.code == NSFileReadNoSuchFileError || nsError.code == NSFileNoSuchFileError)
+            let isPosixMissing = nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ENOENT)
+            return isCocoaMissing || isPosixMissing
+        }
+    }
+
+    /// True only if what exists at `url` is a regular file according to `lstat`
+    /// (not a symbolic link, directory or special file). Used after a copy to
+    /// verify what was actually created.
+    static func isRegularFileOnDisk(_ url: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return false }
+        return (attributes[.type] as? FileAttributeType) == .typeRegular
     }
 
     /// True only for a regular file that is not a symbolic link. Directories and
@@ -533,6 +613,12 @@ open class FSIShareViewController: SLComposeServiceViewController {
         do {
             if FileManager.default.fileExists(atPath: dstURL.path) { try FileManager.default.removeItem(at: dstURL) }
             try FileManager.default.copyItem(at: srcURL, to: dstURL)
+            // Re-check what was actually created (the source could have changed
+            // after the first check): only a regular file may stay.
+            guard Self.isRegularFileOnDisk(dstURL) else {
+                removeShareDirectory(of: dstURL)
+                return false
+            }
             try protect(dstURL)
             return true
         } catch {
@@ -543,6 +629,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     private func getSharedMediaFile(forVideo: URL) -> SharingFile? {
+        dispatchPrecondition(condition: .onQueue(stateQueue))
         let asset = AVAsset(url: forVideo)
         let duration = (CMTimeGetSeconds(asset.duration) * 1000).rounded()
         guard let thumbnailPath = newThumbnailPath() else {
@@ -611,7 +698,36 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     private func completeAndExit() {
-        extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+        completeRequestOnce()
+    }
+
+    /// True once the share was cancelled or failed. Lock-protected, so it can
+    /// be read from any queue without waiting for the state queue.
+    private var isAbortedNow: Bool {
+        flagLock.lock()
+        defer { flagLock.unlock() }
+        return abortedFlag
+    }
+
+    /// Marks the share aborted. Returns false if it already was.
+    private func markAborted() -> Bool {
+        flagLock.lock()
+        defer { flagLock.unlock() }
+        let isFirst = !abortedFlag
+        abortedFlag = true
+        return isFirst
+    }
+
+    /// Completes the extension request exactly once, whichever path gets here
+    /// first (success, error alert, cancel).
+    private func completeRequestOnce() {
+        flagLock.lock()
+        let isFirst = !completedFlag
+        completedFlag = true
+        flagLock.unlock()
+        if isFirst {
+            extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+        }
     }
     
     /// Deletes everything this invocation staged. Used on cancel, error and
@@ -623,19 +739,23 @@ open class FSIShareViewController: SLComposeServiceViewController {
         }
     }
 
-    /// Marks the share aborted, THEN deletes everything staged. Because loads
-    /// run their handlers on the same queue, a load either finished before this
-    /// (its files are deleted here) or starts after it (and stages nothing).
-    /// Returns false if the share was already aborted.
+    /// Marks the share aborted, THEN deletes everything staged. The flag is set
+    /// without touching the state queue, so Cancel never waits for a running
+    /// copy; the deletion then runs on the state queue and Cancel waits for it
+    /// only for a bounded time. A handler that is still copying notices the flag
+    /// and removes its own files. Returns false if the share was already aborted.
     @discardableResult
     private func abortAndCleanup() -> Bool {
-        return stateQueue.sync {
-            let isFirstAbort = !isAborted
-            isAborted = true
-            Self.removeStagedItems(stagedURLs)
-            stagedURLs.removeAll()
-            return isFirstAbort
+        let isFirstAbort = markAborted()
+        let done = DispatchSemaphore(value: 0)
+        stateQueue.async {
+            Self.removeStagedItems(self.stagedURLs)
+            self.stagedURLs.removeAll()
+            self.sharedMedia.removeAll()
+            done.signal()
         }
+        _ = done.wait(timeout: .now() + Self.kCancelCleanupWaitSeconds)
+        return isFirstAbort
     }
 
     /// Removes every staged item (per-share directories and thumbnails). An
@@ -655,7 +775,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             let alert = UIAlertController(title: "Error", message: "Error loading data", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "OK", style: .cancel) { _ in self.dismiss(animated: true, completion: nil) })
             self.present(alert, animated: true, completion: nil)
-            self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+            self.completeRequestOnce()
         }
     }
     

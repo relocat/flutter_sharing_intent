@@ -464,19 +464,24 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
 |---|---|---|---|
 | FSI-107 | Medium | iOS: staged files were not protected while the device is locked, were left behind on cancel or error, and the redirect URL embedded the bundle id with a permissive character set | Fixed |
 
-- Every file the share extension stages is written with complete file protection (`.completeFileProtection`
-  on data writes, and the class is raised on copied files), so it is unreadable while the device is locked.
+- Files the share extension writes itself are protected at creation (`.completeFileProtection`). Files it
+  copies are raised to complete protection before they are shared, and a file that cannot be raised is not
+  shared. Both are unreadable while the device is locked.
 - The extension tracks everything it staged in one invocation (per-share directories and thumbnails) and
   deletes it on cancel and on error. On success the files are kept, because the host app reads them and then
   calls `cleanup`. This is in addition to the immediate removal of a directory whose write failed.
-- The tracked lists and the abort flag are only accessed on one serial queue, and load handlers run on that
-  queue. A cancel or error sets the abort flag before it deletes anything, so a load that finishes later
-  stages nothing, and a share that was cancelled or failed is never delivered. Nothing is staged and nothing
-  is left when no media results.
-- Per-share directories and the thumbnail directory are created with complete file protection, so content is
-  protected from the first byte; a file that cannot be protected is not shared. Only regular files (not
-  directories or symbolic links) are copied, because `cleanup` removes regular files only.
-- A symbolic link in place of the plugin directory or the thumbnail directory is refused before staging.
+- The tracked lists and the delivery state are only accessed on one serial queue, and load handlers run on that
+  queue. The abort flag sits behind a small lock, so Cancel never waits for a copy that is running; a handler
+  that finishes after an abort removes what it staged, and Cancel waits for the cleanup only for a bounded time.
+- Delivery is one atomic decision: a share that was cancelled or failed is dropped, and a share that was already
+  delivered is delivered at most once. Post is not valid until all loads settled, so a Post can only deliver a
+  complete set. Nothing is left behind when no media results, when the redirect cannot be built, or when the
+  shared defaults cannot be written. The extension request is completed at most once.
+- Per-share directories and the thumbnail directory are created with complete file protection, so files
+  created in them inherit it. Only regular files (not directories or symbolic links) are copied, and the copy
+  is checked again after it was made, because `cleanup` removes regular files only.
+- A symbolic link in place of the plugin directory or the thumbnail directory is refused before staging, and so
+  is any error other than "no such file" while checking it.
 - The redirect URL is computed before anything is written to the shared defaults; if it cannot be built the
   extension deletes what it staged and exits.
 - A video thumbnail is written to `<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg`; the name is

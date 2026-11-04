@@ -95,5 +95,40 @@ final class ExtensionLogicTests: XCTestCase {
         XCTAssertFalse(ExtensionLogic.isCopyableRegularFile(link))
         XCTAssertFalse(ExtensionLogic.isCopyableRegularFile(base.appendingPathComponent("missing")))
     }
+
+    func testUsableRootRefusesAnyErrorOtherThanNoSuchFile() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("fsi-denied-\(UUID().uuidString)", isDirectory: true)
+        let locked = base.appendingPathComponent("locked", isDirectory: true)
+        try fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        try fm.createDirectory(at: locked.appendingPathComponent("child"), withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0], ofItemAtPath: locked.path)
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+            try? fm.removeItem(at: base)
+        }
+        try XCTSkipIf(fm.isReadableFile(atPath: locked.appendingPathComponent("child").path), "running as a user that ignores permissions")
+
+        XCTAssertFalse(ExtensionLogic.isUsableRoot(locked.appendingPathComponent("child")),
+                       "a permission error is not proof that the directory is missing")
+    }
+
+    func testRegularFileOnDiskIsTrueOnlyForARegularFile() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("fsi-ondisk-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        let file = base.appendingPathComponent("a.txt")
+        try Data("x".utf8).write(to: file)
+        let directory = base.appendingPathComponent("dir", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let link = base.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: file)
+
+        XCTAssertTrue(ExtensionLogic.isRegularFileOnDisk(file))
+        XCTAssertFalse(ExtensionLogic.isRegularFileOnDisk(directory))
+        XCTAssertFalse(ExtensionLogic.isRegularFileOnDisk(link))
+        XCTAssertFalse(ExtensionLogic.isRegularFileOnDisk(base.appendingPathComponent("missing")))
+    }
 }
 
