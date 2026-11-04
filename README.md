@@ -19,6 +19,7 @@
 >   - sanitises the provider-supplied `_display_name`, which blocks path traversal;
 >   - handles intents off the main thread;
 >   - prunes video thumbnails and per-share directories older than 7 days;
+>   - removes the copy of a share that fails part-way, and every copy of a multi-item share if one item fails;
 >   - removes the unused appcompat, material and constraintlayout dependencies.
 > - **iOS:**
 >   - bridges the UIScene lifecycle (the Flutter default since 3.41), so apps that use it receive shares;
@@ -28,10 +29,12 @@
 >   - sanitises `lastPathComponent` (path separators and control characters removed, capped at
 >     255 UTF-8 bytes on a character boundary);
 >   - stops release builds from logging file names or paths;
->   - clears the App Group share-metadata plist as soon as the app reads it.
+>   - clears the App Group share-metadata plist as soon as the app reads it;
+>   - writes shared files into `<container>/flutter_sharing_intent/<id>/<name>` (one directory per item).
 > - **Dart / all platforms:**
 >   - new `cleanup(List<String> paths)` deletes the iOS App Group copies after use; it is a no-op
->     on Android. On iOS it deletes only regular files strictly inside the App Group container;
+>     on Android. On iOS it deletes only regular files the share extension wrote to
+>     `<container>/flutter_sharing_intent/<id>/` or `<container>/flutter_sharing_intent_thumbnails/`;
 >   - out-of-range media-type values and wrongly typed fields no longer crash decoding.
 >
 > **iOS share extension.** Copy [`ios/Classes/FSIShareViewController.swift`](ios/Classes/FSIShareViewController.swift)

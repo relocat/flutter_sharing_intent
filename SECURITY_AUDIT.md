@@ -4,7 +4,7 @@
 **Auditor:** Relocat maintainers
 **Scope:** everything under this repository except `example/` and `build/`.
 **Methodology:** STRIDE-lite per-entry-point + remediation-commit review + dependency & license audit.
-**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale. FSI-96..99 were fixed on 2026-10-13 and FSI-100..103 on 2026-11-03; see the addenda below.
+**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale. FSI-96..99 were fixed on 2026-10-13 and FSI-100..105 on 2026-11-03/04; see the addenda below.
 
 Task labels C1-C4 in the revision history are the audit's own work phases:
 C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence review.
@@ -291,6 +291,7 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 | 2026-10-13 | Public wording, chronological addenda, complete list of earlier fork fixes. | Relocat maintainers |
 | 2026-10-13 | Addendum: FSI-96..99 fixed (`7c09732`); FSI-90, FSI-94, R-SI-01/02 and DEP-02 wording corrected. | Relocat maintainers |
 | 2026-11-03 | Addendum: FSI-100..103 fixed (content URIs always copied, no share content in logs, per-share directories, cleanup removes only regular files); wording corrections. | Relocat maintainers |
+| 2026-11-04 | Addendum: FSI-104, FSI-105 fixed (failed copies leave nothing behind, links are never followed, cache roots are re-created, iOS files live in a plugin-owned subdirectory and cleanup is limited to it). | Relocat maintainers |
 
 ## Addendum (2026-04-21): R-SI-03 resolved
 
@@ -393,3 +394,29 @@ uncapped: only raw `Data` is capped at 16 MiB.
   that reintroduces the old behaviour and must fail its tests.
 - Swift: `ios/LogicTests/` holds the Swift logic tests; the functions are copied byte-for-byte from
   the iOS sources. On a GitHub-hosted macOS runner (2026-11-03) the example app builds, the plugin Swift sources type-check, and the 36 logic tests pass; the negative control (regular-file check disabled) fails as expected.
+
+## Addendum (2026-11-04): FSI-104, FSI-105, failed copies, cache roots, links, iOS file layout
+
+| Finding ID | Severity | Title | Status |
+|---|---|---|---|
+| FSI-104 | Medium | Android: a failed or partial copy could leave data in the cache; recursive deletes and cache roots were not hardened | Fixed |
+| FSI-105 | Medium | iOS: the share extension wrote into the container root and `cleanup` could delete any regular file in the container | Fixed |
+
+**FSI-104.**
+- A copy that fails for any reason (an unreadable provider, a read error part-way, an over-cap source, a missing stream) deletes its per-share directory before the failure propagates. For a multi-item share, every copy made for the intent is deleted if any item fails, so a dropped share leaves nothing in the cache.
+- A bad thumbnail or duration (for example a malformed video) no longer drops the share: the item is delivered without it. Only I/O and runtime failures are absorbed.
+- Both cache roots are re-created on every use, because the host may wipe them. A plain file found in place of a root is replaced by a directory; a symbolic link in its place makes the share fail closed.
+- Recursive deletes (pruning, partial-copy cleanup) never follow symbolic links: a link is removed itself and its target is left alone.
+- A `content://` URI with an empty authority is treated like one without an authority.
+- Log statements are checked against an allowlist: only counts, sizes, exception class names and fixed tags may be interpolated, and no exception object is passed to the logger.
+
+**FSI-105.** The share extension now writes
+`<App Group container>/flutter_sharing_intent/<UUID>/<name>` (one directory per shared item) and
+`<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg`. `cleanup` deletes only regular files of
+exactly that shape (FSI-31, FSI-103) and then removes an emptied per-share directory. Files at the
+container root, including those written by earlier versions of the plugin, are no longer deletable
+through `cleanup`; the host app removes such leftovers itself. The Swift logic tests cover the
+`cleanup` wiring with the shipped function, and a negative control that removes a guard must fail.
+
+**Verification.** Android: `android/jvm-tests/run.sh` (see the previous addendum), with negative
+controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
