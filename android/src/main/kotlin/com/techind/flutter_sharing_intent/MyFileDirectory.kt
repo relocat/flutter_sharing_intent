@@ -10,7 +10,12 @@ import android.webkit.MimeTypeMap
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.*
 
 /**
@@ -86,24 +91,78 @@ object MyFileDirectory {
     }
 
     /**
+     * Copies every URI in [uris] and returns the paths of the copies, skipping
+     * URIs that yield no copy. All-or-nothing: if any item fails, every copy
+     * already made for this call is deleted before the failure propagates, so
+     * a dropped share leaves no plaintext in the cache (FSI-104).
+     */
+    fun getAbsolutePaths(context: Context, uris: List<Uri>): List<String> {
+        val copies = mutableListOf<String>()
+        var isComplete = false
+        try {
+            for (uri in uris) {
+                getAbsolutePath(context, uri)?.let { copies.add(it) }
+            }
+            isComplete = true
+        } finally {
+            if (!isComplete) deleteShareCopies(copies)
+        }
+        return copies
+    }
+
+    /**
+     * Deletes the per-share directory of each copy in [paths]. Only paths of
+     * the exact form `<root>/<UUID>/<file>` are honoured, and links are never
+     * followed (FSI-104).
+     */
+    fun deleteShareCopies(paths: List<String>) {
+        for (path in paths) {
+            val shareDirectory = File(path).parentFile ?: continue
+            val isShareDirectory = UUID_PATTERN.matches(shareDirectory.name) &&
+                shareDirectory.parentFile?.name == SHARE_CACHE_DIR_NAME
+            if (isShareDirectory) deleteWithoutFollowingLinks(shareDirectory)
+        }
+    }
+
+    /**
+     * Runs a thumbnail or duration extraction, returning null instead of
+     * failing the whole share when the media is malformed (FSI-104). Only I/O
+     * and runtime failures are absorbed; errors such as out-of-memory still
+     * propagate. The log carries the exception class only.
+     */
+    fun <T> orNullOnMediaFailure(extract: () -> T?): T? {
+        return try {
+            extract()
+        } catch (e: IOException) {
+            Log.w("FlutterSharingIntent", "Media extraction failed: ${e.javaClass.simpleName}")
+            null
+        } catch (e: RuntimeException) {
+            Log.w("FlutterSharingIntent", "Media extraction failed: ${e.javaClass.simpleName}")
+            null
+        }
+    }
+
+    /**
      * Copies the stream behind [uri] into a fresh per-share directory below
      * the plugin cache root and returns the copy's path (FSI-100, FSI-102).
      *
      * The display name comes from the provider and is only ever used as the
      * leaf name, after [sanitizeDisplayName]. A URI without an authority names
      * no provider, so it yields null instead of falling back to a provider
-     * supplied `_data` path.
+     * supplied `_data` path. On ANY failure after the directory exists, the
+     * directory and its partial content are deleted before the failure
+     * propagates (FSI-104).
      *
      * @param context The context.
      * @param uri The Uri to copy.
      * @return The path of the cache copy, or null if there is nothing to copy.
      */
     private fun getDataColumn(context: Context, uri: Uri): String? {
-        if (uri.authority == null) return null
+        if (uri.authority.isNullOrEmpty()) return null
 
         val displayName = queryDisplayName(context, uri)
-        val targetFile = if (displayName != null) {
-            newShareTargetFile(context.cacheDir, sanitizeDisplayName(displayName))
+        val fileName = if (displayName != null) {
+            sanitizeDisplayName(displayName)
         } else {
             val mimeType = context.contentResolver.getType(uri)
             val prefix = with(mimeType ?: "") {
@@ -114,17 +173,25 @@ object MyFileDirectory {
                 }
             }
             val type = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
-            newShareTargetFile(context.cacheDir, "${prefix}_${Date().time}.$type")
+            "${prefix}_${Date().time}.$type"
         }
 
-        // SECURITY (FSI-90): Enforce a 16 MiB cap on content streamed from
-        // a provider-controlled URI. Abort and delete the partial file if
-        // the source exceeds the cap.
-        val input = context.contentResolver.openInputStream(uri)
-        if (input == null) {
-            targetFile.parentFile?.deleteRecursively()
-            return null
+        val targetFile = newShareTargetFile(context.cacheDir, fileName)
+        var copiedPath: String? = null
+        try {
+            copiedPath = copyStream(context, uri, targetFile)
+        } finally {
+            if (copiedPath == null) targetFile.parentFile?.let { deleteWithoutFollowingLinks(it) }
         }
+        return copiedPath
+    }
+
+    /**
+     * Streams [uri] into [targetFile] and returns its path, or null if the
+     * provider has no stream. SECURITY (FSI-90): enforces the 16 MiB cap.
+     */
+    private fun copyStream(context: Context, uri: Uri, targetFile: File): String? {
+        val input = context.contentResolver.openInputStream(uri) ?: return null
         input.use {
             FileOutputStream(targetFile).use { fileOut ->
                 val buffer = ByteArray(COPY_BUFFER_BYTES)
@@ -133,8 +200,6 @@ object MyFileDirectory {
                 while (input.read(buffer).also { read = it } != -1) {
                     totalWritten += read
                     if (totalWritten > MAX_STREAM_BYTES) {
-                        fileOut.close()
-                        targetFile.parentFile?.deleteRecursively()
                         throw IOException(
                             "flutter_sharing_intent: source exceeds ${MAX_STREAM_BYTES / BYTES_PER_MIB} MiB plugin cap"
                         )
@@ -167,16 +232,18 @@ object MyFileDirectory {
      *
      * Layout: `<cacheDir>/flutter_sharing_intent/<random UUID>/<name>`. Each
      * share item gets its own directory, so a sender can never overwrite
-     * another cache file, and nothing is written to the cacheDir root. Stale
-     * per-share directories are pruned first.
+     * another cache file, and nothing is written to the cacheDir root. The
+     * root is re-created on every call because the host may wipe it, and
+     * stale per-share directories are pruned first.
      *
      * @param cacheDir The host app cache directory.
      * @param fileName An already sanitised leaf name.
      */
     internal fun newShareTargetFile(cacheDir: File, fileName: String): File {
-        pruneStaleEntries(File(cacheDir, SHARE_CACHE_DIR_NAME), requireUuidDirectories = true)
-        val shareDirectory = File(File(cacheDir, SHARE_CACHE_DIR_NAME), UUID.randomUUID().toString())
-        if (!shareDirectory.mkdirs()) {
+        val root = ensureDirectory(File(cacheDir, SHARE_CACHE_DIR_NAME))
+        pruneStaleEntries(root, requireUuidDirectories = true)
+        val shareDirectory = File(root, UUID.randomUUID().toString())
+        if (!shareDirectory.mkdir()) {
             throw IOException("flutter_sharing_intent: cannot create share directory")
         }
         return File(shareDirectory, fileName)
@@ -187,24 +254,62 @@ object MyFileDirectory {
      *
      * Thumbnails live in their own root,
      * `<cacheDir>/flutter_sharing_intent_thumbnails/<random UUID>.png`, never
-     * inside a per-share directory and never under a sender-chosen name.
-     * Stale thumbnails are pruned first (FSI-23).
+     * inside a per-share directory and never under a sender-chosen name. The
+     * root is re-created on every call. Stale thumbnails are pruned first
+     * (FSI-23).
      */
     internal fun newThumbnailFile(cacheDir: File): File {
-        val root = File(cacheDir, THUMBNAIL_CACHE_DIR_NAME)
+        val root = ensureDirectory(File(cacheDir, THUMBNAIL_CACHE_DIR_NAME))
         pruneStaleEntries(root, requireUuidDirectories = false)
-        if (!root.isDirectory && !root.mkdirs()) {
-            throw IOException("flutter_sharing_intent: cannot create thumbnail directory")
-        }
         return File(root, "${UUID.randomUUID()}.png")
+    }
+
+    /**
+     * Makes sure [directory] exists as a real directory and returns it
+     * (FSI-104). A symbolic link in its place is never followed: the call
+     * fails closed. A plain file in its place is deleted and replaced, so a
+     * leftover from an older layout cannot block sharing.
+     */
+    internal fun ensureDirectory(directory: File): File {
+        val path = directory.toPath()
+        if (Files.isSymbolicLink(path)) {
+            throw IOException("flutter_sharing_intent: cache root is a symbolic link")
+        }
+        if (directory.exists() && !directory.isDirectory && !directory.delete()) {
+            throw IOException("flutter_sharing_intent: cannot replace cache root")
+        }
+        if (!directory.isDirectory && !directory.mkdirs()) {
+            throw IOException("flutter_sharing_intent: cannot create cache root")
+        }
+        return directory
+    }
+
+    /**
+     * Deletes [target] and everything below it WITHOUT following symbolic
+     * links: a link is removed itself and its target is left alone (FSI-104).
+     */
+    internal fun deleteWithoutFollowingLinks(target: File) {
+        val path = target.toPath()
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return
+        Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                Files.delete(file)
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
+                Files.delete(dir)
+                return FileVisitResult.CONTINUE
+            }
+        })
     }
 
     /**
      * Deletes direct children of [root] last modified more than
      * [CACHE_ENTRY_TTL_MILLIS] ago. Only entries this plugin could have
      * created are touched: UUID-named directories under the share root, or
-     * `.png` files under the thumbnail root. Symbolic links are never
-     * followed or deleted. Best-effort: a failure is logged without any path.
+     * `.png` files under the thumbnail root. Symbolic links are neither
+     * followed nor deleted. Best-effort: a failure is logged without any path.
      */
     internal fun pruneStaleEntries(
         root: File,
@@ -220,8 +325,10 @@ object MyFileDirectory {
                 } else {
                     entry.isFile && entry.name.endsWith(THUMBNAIL_SUFFIX)
                 }
-                if (isOurs) entry.deleteRecursively()
+                if (isOurs) deleteWithoutFollowingLinks(entry)
             }
+        } catch (e: IOException) {
+            Log.w("FlutterSharingIntent", "Cache prune failed: ${e.javaClass.simpleName}")
         } catch (e: SecurityException) {
             Log.w("FlutterSharingIntent", "Cache prune failed: ${e.javaClass.simpleName}")
         }

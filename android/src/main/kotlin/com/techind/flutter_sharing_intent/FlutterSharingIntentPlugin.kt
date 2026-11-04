@@ -196,42 +196,35 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
   private fun getSharingUris(intent: Intent?): JSONArray? {
     if (intent == null) return null
 
-    return when (intent.action) {
-      Intent.ACTION_SEND -> {
-        val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-        val path = uri?.let{ MyFileDirectory.getAbsolutePath(applicationContext, it) }
-        if (path != null) {
-          val type = getMediaType(path)
-          val thumbnail = getThumbnail(path, type)
-          val duration = getDuration(path, type)
-
-          JSONArray().put(
-            JSONObject()
-              .put("value", path)
-              .put("type", type.ordinal)
-              .put("thumbnail", thumbnail)
-              .put("duration", duration)
-          )
-        } else null
-      }
-      Intent.ACTION_SEND_MULTIPLE -> {
-        val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
-        val value = uris?.mapNotNull { uri ->
-          val path = MyFileDirectory.getAbsolutePath(applicationContext, uri)
-            ?: return@mapNotNull null
-          val type = getMediaType(path)
-          val thumbnail = getThumbnail(path, type)
-          val duration = getDuration(path, type)
-          return@mapNotNull JSONObject()
-            .put("value", path)
-            .put("type", type.ordinal)
-            .put("thumbnail", thumbnail)
-            .put("duration", duration)
-        }?.toList()
-        if (value != null) JSONArray(value) else null
-      }
-      else -> null
+    val uris: List<Uri> = when (intent.action) {
+      Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
+      Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+        ?: return null
+      else -> return null
     }
+
+    // All-or-nothing: if anything below fails, every copy made for this
+    // intent is deleted before the payload is dropped (FSI-104).
+    val paths = MyFileDirectory.getAbsolutePaths(applicationContext, uris)
+    var isBuilt = false
+    try {
+      val items = JSONArray()
+      for (path in paths) items.put(buildFileItem(path))
+      isBuilt = true
+      return if (intent.action == Intent.ACTION_SEND && items.length() == 0) null else items
+    } finally {
+      if (!isBuilt) MyFileDirectory.deleteShareCopies(paths)
+    }
+  }
+
+  /** Builds the payload entry for one copied file. A bad thumbnail or duration never drops it. */
+  private fun buildFileItem(path: String): JSONObject {
+    val type = getMediaType(path)
+    return JSONObject()
+      .put("value", path)
+      .put("type", type.ordinal)
+      .put("thumbnail", MyFileDirectory.orNullOnMediaFailure { getThumbnail(path, type) })
+      .put("duration", MyFileDirectory.orNullOnMediaFailure { getDuration(path, type) })
   }
 
  private fun getSharingText(intent: Intent?): JSONArray? {
@@ -300,20 +293,28 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
     val bitmap = ThumbnailUtils.createVideoThumbnail(path, MediaStore.Video.Thumbnails.MINI_KIND)
       ?: return null
     val targetFile = MyFileDirectory.newThumbnailFile(applicationContext.cacheDir)
-    FileOutputStream(targetFile).use { out ->
-      bitmap.compress(Bitmap.CompressFormat.PNG, THUMBNAIL_PNG_QUALITY, out)
+    var isWritten = false
+    try {
+      FileOutputStream(targetFile).use { out ->
+        bitmap.compress(Bitmap.CompressFormat.PNG, THUMBNAIL_PNG_QUALITY, out)
+      }
+      isWritten = true
+    } finally {
+      bitmap.recycle()
+      if (!isWritten) targetFile.delete()
     }
-    bitmap.recycle()
     return targetFile.path
   }
 
   private fun getDuration(path: String, type: MediaType): Long? {
     if (type != MediaType.VIDEO) return null // get duration for video only
     val retriever = MediaMetadataRetriever()
-    retriever.setDataSource(path)
-    val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-    retriever.release()
-    return duration
+    try {
+      retriever.setDataSource(path)
+      return retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+    } finally {
+      retriever.release()
+    }
   }
 
   enum class MediaType {
@@ -345,7 +346,7 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
   }
 
   override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-    Log.d(TAG,"onListen ==>> $arguments, $events")
+    Log.d(TAG, "onListen")
     when (arguments) {
 //      "sharing" -> eventSinkSharing = events
       "sharing" -> {
@@ -361,7 +362,7 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
   }
 
   override fun onCancel(arguments: Any?) {
-    Log.d(TAG,"onCancel ==>> $arguments")
+    Log.d(TAG, "onCancel")
     when (arguments) {
       "sharing" -> eventSinkSharing = null
     }

@@ -18,7 +18,7 @@ public final class Uri {
         String rest = schemeEnd < 0 ? raw : raw.substring(schemeEnd + 3);
         int slash = rest.indexOf('/');
         String auth = slash < 0 ? rest : rest.substring(0, slash);
-        authority = auth.isEmpty() ? null : auth;
+        authority = schemeEnd < 0 ? null : auth; // empty string for "scheme:///path", like the platform
         String rawPath = slash < 0 ? "" : rest.substring(slash);
         path = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
     }
