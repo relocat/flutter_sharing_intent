@@ -81,8 +81,9 @@ final class CleanupWiringTests: XCTestCase {
         let wrongRoot = try write(container.appendingPathComponent("other/\(UUID().uuidString)/a.txt"))
         let tooDeep = try write(container.appendingPathComponent("\(ContainerGuard.kShareRootName)/\(UUID().uuidString)/sub/a.txt"))
         let directlyInRoot = try write(container.appendingPathComponent("\(ContainerGuard.kShareRootName)/a.txt"))
-        XCTAssertEqual(remove([notAUuid, wrongRoot, tooDeep, directlyInRoot]), 0)
-        for url in [notAUuid, wrongRoot, tooDeep, directlyInRoot] { XCTAssertTrue(exists(url), url.path) }
+        let looseThumbnail = try write(container.appendingPathComponent("\(ContainerGuard.kThumbnailRootName)/t.jpg"))
+        XCTAssertEqual(remove([notAUuid, wrongRoot, tooDeep, directlyInRoot, looseThumbnail]), 0)
+        for url in [notAUuid, wrongRoot, tooDeep, directlyInRoot, looseThumbnail] { XCTAssertTrue(exists(url), url.path) }
     }
 
     func testDirectoryAtAnOwnedPathIsNeverRemoved() throws {
@@ -114,9 +115,48 @@ final class CleanupWiringTests: XCTestCase {
         let root = container.path
         XCTAssertTrue(ContainerGuard.isPluginOwnedPath(path: "\(root)/\(ContainerGuard.kShareRootName)/\(uuid)/a.txt", containerURL: container))
         XCTAssertTrue(ContainerGuard.isPluginOwnedPath(path: "\(root)/\(ContainerGuard.kShareRootName)/\(uuid.lowercased())/a.txt", containerURL: container))
-        XCTAssertTrue(ContainerGuard.isPluginOwnedPath(path: "\(root)/\(ContainerGuard.kThumbnailRootName)/t.jpg", containerURL: container))
+        XCTAssertTrue(ContainerGuard.isPluginOwnedPath(path: "\(root)/\(ContainerGuard.kThumbnailRootName)/\(uuid).jpg", containerURL: container))
+        XCTAssertFalse(ContainerGuard.isPluginOwnedPath(path: "\(root)/\(ContainerGuard.kThumbnailRootName)/t.jpg", containerURL: container), "a thumbnail leaf must be <UUID>.jpg")
+        XCTAssertFalse(ContainerGuard.isPluginOwnedPath(path: "\(root)/\(ContainerGuard.kThumbnailRootName)/\(uuid).png", containerURL: container))
         XCTAssertFalse(ContainerGuard.isPluginOwnedPath(path: "\(root)/\(ContainerGuard.kShareRootName)/\(uuid)", containerURL: container))
         XCTAssertFalse(ContainerGuard.isPluginOwnedPath(path: "\(root)/a.txt", containerURL: container))
         XCTAssertFalse(ContainerGuard.isPluginOwnedPath(path: "\(root)/\(ContainerGuard.kShareRootName)/\(uuid)/../x", containerURL: container))
     }
+
+    // FSI-106: a symlinked plugin directory must not redirect a delete.
+    func testSymlinkedShareRootIsRefused() throws {
+        let uuid = UUID().uuidString
+        let victim = try write(outside.appendingPathComponent("\(uuid)/a.txt"))
+        try fm.createSymbolicLink(at: container.appendingPathComponent(ContainerGuard.kShareRootName), withDestinationURL: outside)
+        let path = container.appendingPathComponent("\(ContainerGuard.kShareRootName)/\(uuid)/a.txt")
+        XCTAssertEqual(remove([path]), 0)
+        XCTAssertTrue(exists(victim))
+    }
+
+    func testSymlinkedPerShareDirectoryIsRefused() throws {
+        let uuid = UUID().uuidString
+        let victim = try write(outside.appendingPathComponent("a.txt"))
+        let root = container.appendingPathComponent(ContainerGuard.kShareRootName, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: root.appendingPathComponent(uuid), withDestinationURL: outside)
+        XCTAssertEqual(remove([root.appendingPathComponent("\(uuid)/a.txt")]), 0)
+        XCTAssertTrue(exists(victim))
+    }
+
+    func testSymlinkedThumbnailRootIsRefused() throws {
+        let name = "\(UUID().uuidString).jpg"
+        let victim = try write(outside.appendingPathComponent(name))
+        try fm.createSymbolicLink(at: container.appendingPathComponent(ContainerGuard.kThumbnailRootName), withDestinationURL: outside)
+        XCTAssertEqual(remove([container.appendingPathComponent("\(ContainerGuard.kThumbnailRootName)/\(name)")]), 0)
+        XCTAssertTrue(exists(victim))
+    }
+
+    func testNonStandardOwnedPathIsDeletedAsItsStandardForm() throws {
+        let file = try shareFile()
+        let odd = file.deletingLastPathComponent().path + "/./" + file.lastPathComponent
+        XCTAssertEqual(ContainerGuard.removeOwnedFiles(paths: [odd], containerURL: container), 1)
+        XCTAssertFalse(exists(file))
+        XCTAssertFalse(exists(file.deletingLastPathComponent()))
+    }
 }
+

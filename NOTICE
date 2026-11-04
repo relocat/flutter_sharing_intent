@@ -11,6 +11,7 @@ the modifications are licensed under Apache-2.0:
   android/build.gradle
   android/src/main/kotlin/com/techind/flutter_sharing_intent/FlutterSharingIntentPlugin.kt
   android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt
+  example/ios/Share Extension/FSIShareViewController.swift
   ios/Classes/FSIShareViewController.swift
   ios/Classes/SwiftFlutterSharingIntentPlugin.swift
   lib/flutter_sharing_intent.dart

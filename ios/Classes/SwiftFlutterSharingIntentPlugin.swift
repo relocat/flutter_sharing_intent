@@ -248,17 +248,26 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                 #endif
                 continue
             }
+            // Work on the standardised path from here on, so the checks and the
+            // delete name the same file.
+            let standardized = URL(fileURLWithPath: p).standardizedFileURL.path
+            // SECURITY (FSI-106): every owned directory on the way must be a
+            // real directory, so a symlinked plugin root cannot redirect a delete.
+            guard Self.hasRealOwnedDirectories(path: standardized, containerURL: containerURL) else {
+                NSLog("[FSI] cleanup: refusing to delete below a non-directory")
+                continue
+            }
             // SECURITY (FSI-103): `removeItem` deletes directories recursively
             // and the plugin only ever writes regular files, so anything else
             // (a directory, a symlink, a missing path) is refused.
-            guard Self.isRegularFile(atPath: p) else {
+            guard Self.isRegularFile(atPath: standardized) else {
                 NSLog("[FSI] cleanup: refusing to delete a non-regular item")
                 continue
             }
             do {
-                try fm.removeItem(atPath: p)
+                try fm.removeItem(atPath: standardized)
                 removedCount += 1
-                Self.removeEmptyShareDirectory(containing: p, containerURL: containerURL)
+                Self.removeEmptyShareDirectory(containing: standardized, containerURL: containerURL)
             } catch {
                 #if DEBUG
                 NSLog("[FSI] cleanup failed for \(p): \(error.localizedDescription)")
@@ -279,12 +288,34 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         guard let relative = relativeComponents(path: path, containerURL: containerURL) else { return false }
         switch relative.count {
         case 2:
-            return relative[0] == kThumbnailRootName
+            return relative[0] == kThumbnailRootName && isThumbnailLeaf(relative[1])
         case 3:
             return relative[0] == kShareRootName && UUID(uuidString: relative[1]) != nil
         default:
             return false
         }
+    }
+
+    /// True only for a thumbnail leaf name of the exact form `<UUID>.jpg`.
+    static func isThumbnailLeaf(_ name: String) -> Bool {
+        guard name.hasSuffix(".jpg") else { return false }
+        return UUID(uuidString: String(name.dropLast(4))) != nil
+    }
+
+    /// True only if every directory between the container and the file of an
+    /// owned path (the plugin root and the per-share directory) is a real
+    /// directory according to `lstat`, never a symbolic link (FSI-106).
+    static func hasRealOwnedDirectories(path: String, containerURL: URL) -> Bool {
+        guard let relative = relativeComponents(path: path, containerURL: containerURL),
+              relative.count >= 2 else { return false }
+        let fm = FileManager.default
+        var directory = containerURL.standardizedFileURL
+        for component in relative.dropLast() {
+            directory = directory.appendingPathComponent(component, isDirectory: true)
+            guard let attributes = try? fm.attributesOfItem(atPath: directory.path),
+                  (attributes[.type] as? FileAttributeType) == .typeDirectory else { return false }
+        }
+        return true
     }
 
     /// The path components of `path` below the container, or nil when the path
@@ -302,12 +333,10 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         guard isPluginOwnedPath(path: path, containerURL: containerURL),
               let relative = relativeComponents(path: path, containerURL: containerURL),
               relative.count == 3 else { return }
-        let directory = (path as NSString).deletingLastPathComponent
-        let fm = FileManager.default
-        guard let attributes = try? fm.attributesOfItem(atPath: directory),
-              (attributes[.type] as? FileAttributeType) == .typeDirectory,
-              (try? fm.contentsOfDirectory(atPath: directory))?.isEmpty == true else { return }
-        try? fm.removeItem(atPath: directory)
+        // Non-recursive on purpose: rmdir fails on a directory that is not
+        // empty, and the directory comes from the standardised URL (FSI-106).
+        let directory = URL(fileURLWithPath: path).standardizedFileURL.deletingLastPathComponent().path
+        _ = rmdir(directory)
     }
 
     /// Returns true only if `path` names an item strictly below `containerURL`
@@ -665,7 +694,7 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         }
 
         if (identifier.starts(with: "file://") || identifier.starts(with: "/var/mobile/Media") || identifier.starts(with: "/private/var/mobile")) {
-            completion(identifier.replacingOccurrences(of: "file://", with: ""))
+            completion(Self.filePath(fromFileIdentifier: identifier))
             return
         }
         guard let phAsset = PHAsset.fetchAssets(
@@ -682,6 +711,15 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         }
     }
     
+    /// Converts a stored file identifier to a filesystem path. A `file://` URL
+    /// is percent-decoded through `URL`, so a name with a space or non-ASCII
+    /// characters maps to the file that was written; a malformed URL yields
+    /// nil and the item is skipped (FSI-106). A plain path is returned as is.
+    static func filePath(fromFileIdentifier identifier: String) -> String? {
+        if identifier.hasPrefix("file://") { return URL(string: identifier)?.path }
+        return identifier
+    }
+
     /// Decodes the shared-file payload from the App Group UserDefaults blob.
     /// Throws on malformed / tampered input (FSI-61). The caller is responsible
     /// for surfacing the error to Dart via the event sink so the host app can

@@ -328,8 +328,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
         do {
             if let d = image.pngData() {
                 try d.write(to: dst)
-                let decoded = dst.absoluteString.removingPercentEncoding ?? dst.absoluteString
-                return SharingFile(value: decoded, mimeType: "image/png", thumbnail: nil, duration: nil, type: .image)
+                return SharingFile(value: dst.absoluteString, mimeType: "image/png", thumbnail: nil, duration: nil, type: .image)
             }
         } catch {
             log("writeTempImage error: \(error)")
@@ -454,11 +453,13 @@ open class FSIShareViewController: SLComposeServiceViewController {
         do {
             let cg = try gen.copyCGImage(at: time, actualTime: nil)
             if let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.8) {
-                try data.write(to: thumbnailPath)
+                try data.write(to: thumbnailPath, options: .atomic)
                 return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: thumbnailPath.absoluteString, duration: Int(duration), type: .video)
             }
         } catch {
             log("getSharedMediaFile thumbnail error: \(error)")
+            // A failed write can leave a partial file: remove it (FSI-106).
+            try? FileManager.default.removeItem(at: thumbnailPath)
         }
         
         // fallback

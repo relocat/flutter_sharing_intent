@@ -4,7 +4,7 @@
 **Auditor:** Relocat maintainers
 **Scope:** everything under this repository except `example/` and `build/`.
 **Methodology:** STRIDE-lite per-entry-point + remediation-commit review + dependency & license audit.
-**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale. FSI-96..99 were fixed on 2026-10-13 and FSI-100..105 on 2026-11-03/04; see the addenda below.
+**Status:** Closed 2026-04-21 — 5 findings fixed (FSI-90..94; FSI-95 was fixed later, see the addendum below), 5 residual risks accepted (R-SI-03 was fixed later, see the addendum below), 3 low-severity dependency items deferred with rationale. FSI-96..99 were fixed on 2026-10-13 and FSI-100..106 on 2026-11-03/04; see the addenda below.
 
 Task labels C1-C4 in the revision history are the audit's own work phases:
 C1 scaffold, C2 entry-point enumeration, C3 fixes, C4 dependency and licence review.
@@ -292,6 +292,7 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 | 2026-10-13 | Addendum: FSI-96..99 fixed (`7c09732`); FSI-90, FSI-94, R-SI-01/02 and DEP-02 wording corrected. | Relocat maintainers |
 | 2026-11-03 | Addendum: FSI-100..103 fixed (content URIs always copied, no share content in logs, per-share directories, cleanup removes only regular files); wording corrections. | Relocat maintainers |
 | 2026-11-04 | Addendum: FSI-104, FSI-105 fixed (failed copies leave nothing behind, links are never followed, cache roots are re-created, iOS files live in a plugin-owned subdirectory and cleanup is limited to it). | Relocat maintainers |
+| 2026-11-04 | Addendum: FSI-106 fixed (API level, partial deletes, thumbnails, Android `cleanup`, log allowlist, iOS directory checks). | Relocat maintainers |
 
 ## Addendum (2026-04-21): R-SI-03 resolved
 
@@ -420,3 +421,38 @@ through `cleanup`; the host app removes such leftovers itself. The Swift logic t
 
 **Verification.** Android: `android/jvm-tests/run.sh` (see the previous addendum), with negative
 controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
+
+## Addendum (2026-11-04): FSI-106, API level, partial deletes, thumbnails, Android cleanup, log allowlist
+
+| Finding ID | Severity | Title | Status |
+|---|---|---|---|
+| FSI-106 | High | Android: the cache code used `java.nio.file` calls that need API 26, although the plugin supports API 21; plus follow-up hardening on both platforms | Fixed |
+
+- **API level.** The plugin no longer uses `java.nio.file` or `File.toPath`. Links and entry types are
+  read with `android.system.Os.lstat` (API 21), and deletes are a manual recursion that never
+  descends into a link. A source check fails if those calls return. The JVM tests use a stand-in for
+  `Os.lstat`; Android lint (`NewApi`) is run on the plugin as a second check.
+- **Partial deletes.** `deleteShareCopies` and the recursive delete keep going after a failure; the
+  first error is rethrown at the end with the others suppressed, and an undeletable child is not
+  masked by a "directory not empty" error from its parent.
+- **Thumbnails.** A thumbnail is written through one function that deletes the file when the encoder
+  returns false or throws. When a multi-item share is dropped, the thumbnails already created for it
+  are deleted with its copies.
+- **Android `cleanup`.** It now deletes the plugin's own regular files, never following links:
+  `<cache>/flutter_sharing_intent/<UUID>/<name>` (then the emptied directory, non-recursively) and
+  `<cache>/flutter_sharing_intent_thumbnails/<UUID>.png`. Every other path is refused.
+- **Log allowlist.** Each `Log` call must be two arguments: `TAG` or a string literal, and a single
+  string literal whose interpolations are limited to the fixed tag, an exception class name, or a
+  count. Concatenation, bare expressions, the exception-object form, a third argument, `wtf` and
+  `println` with content all fail the check. The Intent type is no longer logged.
+- **iOS.**
+  - A thumbnail is owned only if its file name is `<UUID>.jpg`.
+  - The plugin directories on the path must be real directories (checked with `lstat`); a symbolic
+    link in their place is refused.
+  - An emptied per-share directory is removed with a non-recursive `rmdir`, derived from the
+    standardised path.
+  - File URLs are converted to paths with `URL`, so names with spaces or non-ASCII characters
+    resolve.
+  - A failed thumbnail write leaves no file.
+- **Example app.** `example/ios/Share Extension/FSIShareViewController.swift` is now a copy of the
+  hardened `ios/Classes/FSIShareViewController.swift`, and the README setup step points there.

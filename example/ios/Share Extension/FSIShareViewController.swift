@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified by Relocat (2026); see NOTICE.
 // FSIShareViewController.swift
 // Merged, optimized controller: uses RSI architecture with all FSI features preserved
 // Uses model name `SharingFile` (same fields as SharedMediaFile) where `value` = path
@@ -14,6 +16,50 @@ public let kUserDefaultsMessageKey = "SharingMessageKey"
 public let kAppGroupIdKey = "AppGroupId"
 public let kAppChannel = "flutter_sharing_intent"
 
+// extension UIViewController {
+//     func showToast(_ message: String, duration: Double = 2.0) {
+//         let toastLabel = UILabel()
+//         toastLabel.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+//         toastLabel.textColor = UIColor.white
+//         toastLabel.textAlignment = .center
+//         toastLabel.font = UIFont.systemFont(ofSize: 14)
+//         toastLabel.text = message
+//         toastLabel.alpha = 0.0
+//         toastLabel.numberOfLines = 0
+//         toastLabel.layer.cornerRadius = 10
+//         toastLabel.clipsToBounds = true
+//
+//         let maxWidthPercentage: CGFloat = 0.8
+//         let maxMessageSize = CGSize(
+//             width: self.view.bounds.size.width * maxWidthPercentage,
+//             height: self.view.bounds.size.height * maxWidthPercentage
+//         )
+//
+//         var expectedSize = toastLabel.sizeThatFits(maxMessageSize)
+//         expectedSize.width += 24
+//         expectedSize.height += 16
+//
+//         toastLabel.frame = CGRect(
+//             x: (self.view.frame.size.width - expectedSize.width) / 2,
+//             y: self.view.frame.size.height - expectedSize.height - 50,
+//             width: expectedSize.width,
+//             height: expectedSize.height
+//         )
+//
+//         self.view.addSubview(toastLabel)
+//
+//         UIView.animate(withDuration: 0.5, animations: {
+//             toastLabel.alpha = 1.0
+//         }) { _ in
+//             UIView.animate(withDuration: 0.5, delay: duration, options: .curveEaseOut, animations: {
+//                 toastLabel.alpha = 0.0
+//             }) { _ in
+//                 toastLabel.removeFromSuperview()
+//             }
+//         }
+//     }
+// }
+
 // @objc(FSIShareViewController)
 @available(swift, introduced: 5.0)
 open class FSIShareViewController: SLComposeServiceViewController {
@@ -26,6 +72,23 @@ open class FSIShareViewController: SLComposeServiceViewController {
     
     // Debug
     private let debugLogs = false
+
+    // MARK: - Security constants
+
+    /// Plugin-level cap for raw Data payloads delivered by share extensions (FSI-92).
+    /// Mirrors the Android plugin cap (16 MiB). Prevents a malicious source app from
+    /// exhausting the App Group container storage via an unbounded Data blob.
+    private static let kMaxRawDataBytes = 16 * 1024 * 1024
+
+    /// App Group container directory that holds one sub-directory per shared
+    /// item, `<container>/flutter_sharing_intent/<UUID>/<name>` (FSI-105).
+    /// Must match `SwiftFlutterSharingIntentPlugin.kShareRootName`: the plugin
+    /// deletes only files of this shape.
+    static let kShareRootName = "flutter_sharing_intent"
+
+    /// App Group container directory for generated video thumbnails,
+    /// `<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg` (FSI-105).
+    static let kThumbnailRootName = "flutter_sharing_intent_thumbnails"
     
     // MARK: - Lifecycle
     open override func viewDidLoad() {
@@ -168,7 +231,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             if !self.sharedMedia.isEmpty {
                 self.saveAndRedirect()
             } else {
-                print("FSIShare: No shared media → stopping.")
+                self.log("No shared media → stopping.")
                 self.completeAndExit()
             }
         }
@@ -197,7 +260,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
         // data can be URL, UIImage, or Data
         if let url = data as? URL {
             let filename = getFileName(from: url, type: .image)
-            if let dst = containerURL()?.appendingPathComponent(filename) {
+            if let dst = newShareDestination(named: filename) {
                 if copyFile(at: url, to: dst) {
                     sharedMedia.append(SharingFile(value: dst.absoluteString, mimeType: url.mimeType(), thumbnail: nil, duration: nil, type: .image))
                 }
@@ -217,7 +280,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private func handleVideoItem(data: NSSecureCoding?, index: Int, total: Int) {
         if let url = data as? URL {
             let filename = getFileName(from: url, type: .video)
-            if let dst = containerURL()?.appendingPathComponent(filename) {
+            if let dst = newShareDestination(named: filename) {
                 if copyFile(at: url, to: dst) {
                     if let m = getSharedMediaFile(forVideo: dst) {
                         sharedMedia.append(m)
@@ -231,19 +294,27 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private func handleFileItem(data: NSSecureCoding?, index: Int, total: Int) {
         if let url = data as? URL {
             let filename = getFileName(from: url, type: .file)
-            if let dst = containerURL()?.appendingPathComponent(filename) {
+            if let dst = newShareDestination(named: filename) {
                 if copyFile(at: url, to: dst) {
                     sharedMedia.append(SharingFile(value: dst.absoluteString, mimeType: url.mimeType(), thumbnail: nil, duration: nil, type: .file))
                 }
             }
         }
         else if let raw = data as? Data {
+            // SECURITY (FSI-92): Reject oversized raw Data payloads to prevent
+            // App Group container storage exhaustion by a malicious source app.
+            guard raw.count <= Self.kMaxRawDataBytes else {
+                self.log("oversize Data payload rejected (\(raw.count) bytes > \(Self.kMaxRawDataBytes) limit)")
+                return
+            }
             let filename = "File_\(UUID().uuidString)"
-            if let dst = containerURL()?.appendingPathComponent(filename) {
+            if let dst = newShareDestination(named: filename) {
                 do {
                     try raw.write(to: dst)
                     sharedMedia.append(SharingFile(value: dst.absoluteString, mimeType: "application/octet-stream", thumbnail: nil, duration: nil, type: .file))
-                } catch {}
+                } catch {
+                    removeShareDirectory(of: dst)
+                }
             }
         }
         
@@ -252,18 +323,17 @@ open class FSIShareViewController: SLComposeServiceViewController {
     
     // MARK: - Helpers: write temp image
     private func writeTempImage(_ image: UIImage) -> SharingFile? {
-        guard let container = containerURL() else { return nil }
         let tempName = "TempImage_\(UUID().uuidString).png"
-        let dst = container.appendingPathComponent(tempName)
+        guard let dst = newShareDestination(named: tempName) else { return nil }
         do {
             if let d = image.pngData() {
                 try d.write(to: dst)
-                let decoded = dst.absoluteString.removingPercentEncoding ?? dst.absoluteString
-                return SharingFile(value: decoded, mimeType: "image/png", thumbnail: nil, duration: nil, type: .image)
+                return SharingFile(value: dst.absoluteString, mimeType: "image/png", thumbnail: nil, duration: nil, type: .image)
             }
         } catch {
             log("writeTempImage error: \(error)")
         }
+        removeShareDirectory(of: dst)
         return nil
     }
     
@@ -322,11 +392,39 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     func getFileName(from url: URL, type: SharingFileType) -> String {
-        var name = url.lastPathComponent
-        if name.isEmpty { name = UUID().uuidString + "." + getExtension(from: url, type: type) }
-        return name
+        // SECURITY (FSI-93): url.lastPathComponent is attacker-controlled.
+        // Sanitize before using as a destination filename in the App Group container.
+        let raw = url.lastPathComponent
+        if raw.isEmpty {
+            return UUID().uuidString + "." + getExtension(from: url, type: type)
+        }
+        return sanitizedComponent(raw)
     }
     
+    /// Creates a fresh per-share directory,
+    /// `<container>/flutter_sharing_intent/<UUID>/`, and returns the URL of
+    /// `name` inside it (FSI-105). Every shared item gets its own directory,
+    /// so the host app's cleanup can remove exactly what the plugin wrote.
+    func newShareDestination(named name: String) -> URL? {
+        guard let container = containerURL() else { return nil }
+        let directory = container
+            .appendingPathComponent(Self.kShareRootName, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            log("newShareDestination error: \(error)")
+            return nil
+        }
+        return directory.appendingPathComponent(name)
+    }
+
+    /// Removes the per-share directory that `fileURL` was meant to live in
+    /// after a failed write, so a failed share leaves nothing behind.
+    private func removeShareDirectory(of fileURL: URL) {
+        try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+    }
+
     func copyFile(at srcURL: URL, to dstURL: URL) -> Bool {
         do {
             if FileManager.default.fileExists(atPath: dstURL.path) { try FileManager.default.removeItem(at: dstURL) }
@@ -334,6 +432,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             return true
         } catch {
             log("copyFile error: \(error)")
+            removeShareDirectory(of: dstURL)
             return false
         }
     }
@@ -341,12 +440,10 @@ open class FSIShareViewController: SLComposeServiceViewController {
     private func getSharedMediaFile(forVideo: URL) -> SharingFile? {
         let asset = AVAsset(url: forVideo)
         let duration = (CMTimeGetSeconds(asset.duration) * 1000).rounded()
-        let thumbnailPath = getThumbnailPath(for: forVideo)
-        
-        if FileManager.default.fileExists(atPath: thumbnailPath.path) {
-            return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: thumbnailPath.absoluteString, duration: Int(duration), type: .video)
+        guard let thumbnailPath = newThumbnailPath() else {
+            return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: nil, duration: Int(duration), type: .video)
         }
-        
+
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
         gen.maximumSize = CGSize(width: 360, height: 360)
@@ -356,21 +453,32 @@ open class FSIShareViewController: SLComposeServiceViewController {
         do {
             let cg = try gen.copyCGImage(at: time, actualTime: nil)
             if let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.8) {
-                try data.write(to: thumbnailPath)
+                try data.write(to: thumbnailPath, options: .atomic)
                 return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: thumbnailPath.absoluteString, duration: Int(duration), type: .video)
             }
         } catch {
             log("getSharedMediaFile thumbnail error: \(error)")
+            // A failed write can leave a partial file: remove it (FSI-106).
+            try? FileManager.default.removeItem(at: thumbnailPath)
         }
         
         // fallback
         return SharingFile(value: forVideo.absoluteString, mimeType: forVideo.mimeType(), thumbnail: nil, duration: Int(duration), type: .video)
     }
     
-    private func getThumbnailPath(for url: URL) -> URL {
-        guard let container = containerURL() else { fatalError("App group not configured or missing") }
-        let fileName = Data(url.lastPathComponent.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")
-        return container.appendingPathComponent("\(fileName).jpg")
+    /// Returns a fresh `<container>/flutter_sharing_intent_thumbnails/<UUID>.jpg`
+    /// URL, creating the thumbnail root if needed (FSI-105). Returns nil when
+    /// the root cannot be created; the video is then shared without a thumbnail.
+    private func newThumbnailPath() -> URL? {
+        guard let container = containerURL() else { return nil }
+        let directory = container.appendingPathComponent(Self.kThumbnailRootName, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            log("newThumbnailPath error: \(error)")
+            return nil
+        }
+        return directory.appendingPathComponent("\(UUID().uuidString).jpg")
     }
     
     private func containerURL() -> URL? {
@@ -408,7 +516,59 @@ open class FSIShareViewController: SLComposeServiceViewController {
     
     // MARK: - Logging
     private func log(_ s: String) { if debugLogs { print("[FSIShareVC] \(s)") } }
-    
+
+    // MARK: - Path safety
+
+    /// Sanitize a URL path component so it is safe to use as a filename in
+    /// the App Group container (FSI-93).
+    ///
+    /// Rules applied in order:
+    /// 1. Strip "/" path separators and control characters: NUL and the rest
+    ///    of C0 (U+0000-U+001F), DEL (U+007F) and C1 (U+0080-U+009F).
+    /// 2. Cap at 255 bytes in UTF-8 (POSIX NAME\_MAX), cutting only between
+    ///    whole Characters (extended grapheme clusters).
+    /// 3. Return "unnamed" for an empty or blank result, and for "." and "..".
+    ///
+    /// - Parameter raw: The raw string (typically `url.lastPathComponent`).
+    /// - Returns: A safe, non-empty filename component.
+    private func sanitizedComponent(_ raw: String) -> String {
+        let maxBytes = 255 // POSIX NAME_MAX
+
+        // Step 1: a Swift String can contain U+0000, so NUL is stripped
+        // explicitly together with the other control characters. Filtering
+        // works on whole Unicode scalars and never splits one.
+        let keptScalars = raw.unicodeScalars.filter { scalar in
+            let v = scalar.value
+            if scalar == "/" { return false }
+            if v <= 0x1F { return false }              // NUL and C0
+            if v >= 0x7F && v <= 0x9F { return false } // DEL and C1
+            return true
+        }
+        var stripped = ""
+        stripped.unicodeScalars.append(contentsOf: keptScalars)
+
+        // Step 2: keep whole Characters while they fit in maxBytes of UTF-8.
+        // The result is a prefix of valid Characters, so it is valid UTF-8,
+        // contains no U+FFFD and never separates a combining mark or an emoji
+        // sequence from the rest of its Character. A single Character longer
+        // than maxBytes yields an empty result, which step 3 replaces.
+        var truncated = ""
+        var usedBytes = 0
+        for character in stripped {
+            let size = character.utf8.count
+            if usedBytes + size > maxBytes { break }
+            truncated.append(character)
+            usedBytes += size
+        }
+
+        // Step 3: reject empty, blank and dot-only special names.
+        if truncated.trimmingCharacters(in: .whitespaces).isEmpty
+            || truncated == "." || truncated == ".." {
+            return "unnamed"
+        }
+        return truncated
+    }
+
 }
 
 // MARK: - Extensions
@@ -428,7 +588,6 @@ extension URL {
 extension NSItemProvider {
     var isImage: Bool { return hasItemConformingToTypeIdentifier(UType.image) }
     var isMovie: Bool { return hasItemConformingToTypeIdentifier(UType.movie) }
-    // var isText: Bool { return hasItemConformingToTypeIdentifier(UType.text) }
     var isText: Bool {
         hasItemConformingToTypeIdentifier(UType.plainText) || hasItemConformingToTypeIdentifier(UType.text)
     }
@@ -471,9 +630,16 @@ class SharingFile: Codable {
         self.message = message
     }
     
-    // Debug method to print out SharedMediaFile details in the console
+    // Debug method to print out SharedMediaFile details in the console.
+    //
+    // Body wrapped in #if DEBUG so production builds cannot leak
+    // user-supplied filenames, MIME types, or thumbnail paths to the
+    // system log via this helper. Preserves the API for development
+    // use. Addresses R-SI-03 (see SECURITY_AUDIT.md).
     func toString() {
+        #if DEBUG
         print("[SharingFile] \n\tvalue: \(self.value)\n\tthumbnail: \(self.thumbnail ?? "--" )\n\tduration: \(self.duration ?? 0)\n\ttype: \(self.type)\n\tmimeType: \(String(describing: self.mimeType))\n\tmessage: \(String(describing: self.message))")
+        #endif
     }
 }
 
@@ -484,39 +650,6 @@ enum SharingFileType: Int, Codable {
     case image
     case video
     case file
-    
-//    public var toUTTypeIdentifier: String {
-//        if #available(iOS 14.0, *) {
-//            switch self {
-//            case .image:
-//                return UTType.image.identifier
-//            case .video:
-//                return UTType.movie.identifier
-//            case .text:
-//                return UTType.text.identifier
-//                //         case .audio:
-//                //             return UTType.audio.identifier
-//            case .file:
-//                return UTType.fileURL.identifier
-//            case .url:
-//                return UTType.url.identifier
-//            }
-//        }
-//        switch self {
-//        case .image:
-//            return "public.image"
-//        case .video:
-//            return "public.movie"
-//        case .text:
-//            return "public.text"
-//            //         case .audio:
-//            //             return "public.audio"
-//        case .file:
-//            return "public.file-url"
-//        case .url:
-//            return "public.url"
-//        }
-//    }
 }
 
 // Unified UTType → works on iOS 11–18

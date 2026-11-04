@@ -32,14 +32,16 @@
 >   - clears the App Group share-metadata plist as soon as the app reads it;
 >   - writes shared files into `<container>/flutter_sharing_intent/<id>/<name>` (one directory per item).
 > - **Dart / all platforms:**
->   - new `cleanup(List<String> paths)` deletes the iOS App Group copies after use; it is a no-op
->     on Android. On iOS it deletes only regular files the share extension wrote to
->     `<container>/flutter_sharing_intent/<id>/` or `<container>/flutter_sharing_intent_thumbnails/`;
+>   - new `cleanup(List<String> paths)` deletes the plugin's own copies after use. On iOS it deletes
+>     only regular files the share extension wrote to `<container>/flutter_sharing_intent/<id>/<name>`
+>     or `<container>/flutter_sharing_intent_thumbnails/<id>.jpg`; on Android only regular files in
+>     `<cache>/flutter_sharing_intent/<id>/<name>` and `<cache>/flutter_sharing_intent_thumbnails/<id>.png`.
+>     Every other path is ignored, and links are never followed;
 >   - out-of-range media-type values and wrongly typed fields no longer crash decoding.
 >
 > **iOS share extension.** Copy [`ios/Classes/FSIShareViewController.swift`](ios/Classes/FSIShareViewController.swift)
 > into your Share Extension target. The iOS changes above live in that file; the copy under
-> `example/ios/Share Extension/` is upstream's unmodified version.
+> `example/ios/Share Extension/` is identical to it.
 >
 > **Licence.** Apache-2.0, unchanged from upstream (see [LICENSE](LICENSE)). Our modifications are
 > released under the same licence; modified files are marked, and [NOTICE](NOTICE) lists them.
@@ -368,8 +370,8 @@ end
 [//]: # ()
 [//]: # (Here `group.com.techind.flutterSharingIntentExample` is the App Group ID created in previous step.)
 
-#### 6. Add file [FSIShareViewController.swift](./example/ios/Share%20Extension/FSIShareViewController.swift)  to  [ios/Share Extension/FSIShareViewController.swift](./example/ios/Share%20Extension/FSIShareViewController.swift):
-You can get the file from [here](./example/ios/Share%20Extension/FSIShareViewController.swift)
+#### 6. Add file [FSIShareViewController.swift](./ios/Classes/FSIShareViewController.swift)  to  [ios/Share Extension/FSIShareViewController.swift](./ios/Classes/FSIShareViewController.swift):
+You can get the file from [here](./ios/Classes/FSIShareViewController.swift). The copy under `example/ios/Share Extension/` is identical.
 
 ##### Make your `ShareViewController` [ios/Share Extension/ShareViewController.swift](./example/ios/Share%20Extension/ShareViewController.swift) inherit from `FSIShareViewController`:
 

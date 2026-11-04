@@ -106,11 +106,11 @@ private fun testExistingCacheFileIsNeverOverwritten() {
     val context = freshContext()
     val victim = File(context.cacheDir, "photo.jpg").apply { writeText("original") }
     val uri = "content://p.a/1"
-    context.register(uri, "photo.jpg", "attacker".toByteArray())
+    context.register(uri, "photo.jpg", "x".toByteArray())
     MyFileDirectory.getAbsolutePath(context, Uri.parse(uri))
     check("R-2 an existing cache file with the same name is untouched", victim.readText() == "original")
     val traversal = "content://p.a/2"
-    context.register(traversal, "../photo.jpg", "attacker".toByteArray())
+    context.register(traversal, "../photo.jpg", "x".toByteArray())
     val path = MyFileDirectory.getAbsolutePath(context, Uri.parse(traversal))
     check("R-2 traversal in a display name stays in the share directory", isInsideShareRoot(context, path) && victim.readText() == "original")
 }
@@ -288,27 +288,133 @@ private fun testNullStreamRemovesItsDirectory() {
     check("M-3 provider without a stream leaves no directory", entriesOf(shareRoot(context)).isEmpty(), "${entriesOf(shareRoot(context))}")
 }
 
-// R-1 / I-2: allowlist of log interpolations.
-private val logCallStart = Regex("""Log\.[a-z]\(""")
+private fun canBlockDeletes(directory: File): Boolean {
+    directory.setWritable(false, false)
+    return !directory.canWrite()
+}
+
+// F-3: one failing delete never stops the others, and never hides the first error.
+private fun testDeleteContinuesAfterAFailure() {
+    val context = freshContext()
+    val first = "content://p.a/1"
+    val second = "content://p.a/2"
+    context.register(first, "a.txt", "x".toByteArray())
+    context.register(second, "b.txt", "x".toByteArray())
+    val firstPath = MyFileDirectory.getAbsolutePath(context, Uri.parse(first))!!
+    val secondPath = MyFileDirectory.getAbsolutePath(context, Uri.parse(second))!!
+    val firstDirectory = File(firstPath).parentFile
+    if (!canBlockDeletes(firstDirectory)) {
+        firstDirectory.setWritable(true, false)
+        println("SKIP F-3 (this account can delete from read-only directories)")
+        return
+    }
+    val thrown = try { MyFileDirectory.deleteShareCopies(listOf(firstPath, secondPath)); null } catch (e: IOException) { e }
+    firstDirectory.setWritable(true, false)
+    check("F-3 the first failure is rethrown after the loop", thrown != null)
+    check("F-3 a later copy is still deleted", !File(secondPath).parentFile.exists())
+    check("F-3 the failed copy is left for a retry", File(firstPath).exists())
+
+    val tree = File(context.cacheDir, "tree").apply { mkdirs() }
+    val blocked = File(tree, "blocked").apply { mkdirs() }
+    File(blocked, "f.txt").writeText("x")
+    File(tree, "other.txt").writeText("x")
+    canBlockDeletes(blocked)
+    val treeFailure = try { MyFileDirectory.deleteWithoutFollowingLinks(tree); null } catch (e: IOException) { e }
+    blocked.setWritable(true, false)
+    check("F-3 recursive delete continued past the failure", !File(tree, "other.txt").exists())
+    check("F-3 recursive delete reports the real error, not the parent's", treeFailure?.message?.contains("cannot delete cache entry") == true && treeFailure.suppressed.isEmpty(), "${treeFailure?.message} suppressed=${treeFailure?.suppressed?.size}")
+}
+
+// F-4: thumbnails.
+private fun testThumbnailWriting() {
+    val context = freshContext()
+    val thumbnailRoot = File(context.cacheDir, MyFileDirectory.THUMBNAIL_CACHE_DIR_NAME)
+    val ok = MyFileDirectory.writeThumbnail(context.cacheDir) { out -> out.write(1); true }
+    check("F-4 a successful thumbnail is written", ok != null && File(ok).length() == 1L)
+    val failed = MyFileDirectory.writeThumbnail(context.cacheDir) { out -> out.write(1); false }
+    check("F-4 compress returning false yields null", failed == null)
+    val threw = try { MyFileDirectory.writeThumbnail(context.cacheDir) { out -> out.write(1); throw IOException("boom") }; false } catch (e: IOException) { true }
+    check("F-4 compress throwing propagates", threw)
+    check("F-4 no partial thumbnail is left", entriesOf(thumbnailRoot) == listOf(File(ok!!).name), "${entriesOf(thumbnailRoot)}")
+    val removed = MyFileDirectory.removeOwnedFiles(context.cacheDir, listOf(ok))
+    check("F-4 thumbnails created for a failed share are removable", removed == 1 && entriesOf(thumbnailRoot).isEmpty())
+}
+
+// A-2: Android cleanup(paths).
+private fun testCleanupRemovesOnlyOwnedFiles() {
+    val context = freshContext()
+    val uri = "content://p.a/1"
+    context.register(uri, "a.txt", "x".toByteArray())
+    val shareFile = File(MyFileDirectory.getAbsolutePath(context, Uri.parse(uri))!!)
+    val thumbnail = MyFileDirectory.newThumbnailFile(context.cacheDir).apply { writeText("x") }
+    val legacy = File(context.cacheDir, "photo.jpg").apply { writeText("x") }
+    val outside = Files.createTempDirectory("fsi-outside").toFile().canonicalFile
+    val foreign = File(outside, "keep.txt").apply { writeText("x") }
+    val root = File(context.cacheDir, MyFileDirectory.SHARE_CACHE_DIR_NAME)
+    val directoryAtFile = File(root, java.util.UUID.randomUUID().toString()).apply { mkdirs(); File(this, "sub").mkdirs(); File(this, "sub/inner.txt").writeText("x") }
+    val notUuid = File(root, "not-a-uuid").apply { mkdirs(); File(this, "a.txt").writeText("x") }
+    val badThumbnail = File(context.cacheDir, "${MyFileDirectory.THUMBNAIL_CACHE_DIR_NAME}/t.png").apply { writeText("x") }
+    val linkDirectory = File(root, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
+    Files.createSymbolicLink(File(linkDirectory, "link.txt").toPath(), foreign.toPath())
+    val siblingDirectory = File(root, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
+    val siblingTarget = File(siblingDirectory, "a.txt").apply { writeText("x") }
+    val siblingOther = File(siblingDirectory, "b.txt").apply { writeText("x") }
+
+    val removed = MyFileDirectory.removeOwnedFiles(context.cacheDir, listOf(
+        shareFile.path, thumbnail.path, legacy.path, foreign.path,
+        File(directoryAtFile, "sub").path, File(notUuid, "a.txt").path, badThumbnail.path,
+        File(linkDirectory, "link.txt").path, siblingTarget.path,
+        shareFile.parentFile.path + "/../" + shareFile.name, shareFile.parentFile.path + "//" + shareFile.name, "relative/path", "",
+    ))
+    check("A-2 removes exactly the owned regular files", removed == 3, "removed=$removed")
+    check("A-2 owned share file and its emptied directory are gone", !shareFile.exists() && !shareFile.parentFile.exists())
+    check("A-2 owned thumbnail is gone", !thumbnail.exists())
+    check("A-2 a share directory with another file keeps that file", siblingOther.exists() && siblingDirectory.exists())
+    check("A-2 cacheDir root file is untouched", legacy.exists())
+    check("A-2 file outside the cache is untouched", foreign.exists())
+    check("A-2 a directory at the file position is untouched", File(directoryAtFile, "sub/inner.txt").exists())
+    check("A-2 wrong shapes are untouched", File(notUuid, "a.txt").exists() && badThumbnail.exists())
+    check("A-2 a symlink at the file position is neither followed nor removed", Files.isSymbolicLink(File(linkDirectory, "link.txt").toPath()) && foreign.exists())
+    check("A-2 the plugin roots stay", root.isDirectory)
+
+    val linked = freshContext()
+    val target = File(outside, "linked-target").apply { mkdirs() }
+    val victimDirectory = File(target, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
+    val victim = File(victimDirectory, "a.txt").apply { writeText("x") }
+    Files.createSymbolicLink(File(linked.cacheDir, MyFileDirectory.SHARE_CACHE_DIR_NAME).toPath(), target.toPath())
+    val viaLink = MyFileDirectory.removeOwnedFiles(linked.cacheDir, listOf(File(linked.cacheDir, "${MyFileDirectory.SHARE_CACHE_DIR_NAME}/${victimDirectory.name}/a.txt").path))
+    check("A-2 a path through a symlinked root is refused", viaLink == 0 && victim.exists())
+}
+
+// F-1: the plugin must not use java.nio.file (API 26) or File.toPath().
+private val api26Pattern = Regex("""java\.nio\.file|\.toPath\(|\bFiles\.""")
+
+private fun testNoApi26Calls(scanDirectory: File) {
+    val offenders = scanDirectory.walkTopDown().filter { it.extension == "kt" }.flatMap { file ->
+        file.readLines().withIndex().filter { (_, line) -> api26Pattern.containsMatchIn(line) }.map { "${file.name}:${it.index + 1}" }
+    }.toList()
+    check("F-1 no java.nio.file or File.toPath in the plugin sources", offenders.isEmpty(), offenders.joinToString(" | "))
+}
+
+// F-2: allowlist of log calls.
 private val bracedInterpolation = Regex("""\$\{([^}]*)\}""")
 private val bareInterpolation = Regex("""\$([A-Za-z_][A-Za-z0-9_]*)""")
+private val stringLiteral = Regex(""""(?:[^"\\]|\\.)*"""")
 private val allowedExpressions = listOf(
     Regex("tag"),
-    Regex("intent\\.action"),
-    Regex("intent\\.type"),
     Regex("""[A-Za-z0-9_.?]+\.javaClass\.simpleName"""),
     Regex("""[A-Za-z0-9_.?]+(\.size|\.length\(\))( \?: 0)?"""),
 )
 private val allowedBareNames = setOf("tag")
+private const val LOG_TAG_ARGUMENT = "TAG"
+private const val LOG_ARGUMENT_COUNT = 2
 
-/** Returns the full text of every `Log.x(...)` call, joined across lines up to the matching parenthesis. */
-private fun logCalls(text: String): List<String> {
-    val calls = mutableListOf<String>()
-    for (start in logCallStart.findAll(text)) {
+private fun logCallRanges(text: String): List<IntRange> {
+    val calls = mutableListOf<IntRange>()
+    for (start in Regex("""Log\.\w+\(""").findAll(text)) {
         var depth = 0
         var inString = false
         var index = start.range.last
-        val begin = start.range.first
         while (index < text.length) {
             val ch = text[index]
             if (inString) {
@@ -320,81 +426,115 @@ private fun logCalls(text: String): List<String> {
             }
             index++
         }
-        calls.add(text.substring(begin, minOf(index + 1, text.length)))
+        calls.add(start.range.first..minOf(index, text.length - 1))
     }
     return calls
 }
 
-private fun topLevelArgumentCount(call: String): Int {
+/** Splits the arguments of one call at top-level commas, string- and bracket-aware. */
+private fun topLevelArguments(call: String): List<String> {
+    val arguments = mutableListOf<String>()
     var depth = 0
     var inString = false
-    var commas = 0
-    var index = call.indexOf('(')
+    var begin = call.indexOf('(') + 1
+    var index = begin
     while (index < call.length) {
         val ch = call[index]
         if (inString) {
             if (ch == '\\') index++ else if (ch == '"') inString = false
         } else when (ch) {
             '"' -> inString = true
-            '(', '{' -> depth++
-            ')', '}' -> depth--
-            ',' -> if (depth == 1) commas++
+            '(', '{', '[' -> depth++
+            ')', '}', ']' -> { if (depth == 0) { arguments.add(call.substring(begin, index).trim()); return arguments }; depth-- }
+            ',' -> if (depth == 0) { arguments.add(call.substring(begin, index).trim()); begin = index + 1 }
         }
         index++
     }
-    return commas + 1
+    arguments.add(call.substring(begin).trim())
+    return arguments
 }
 
 /** Returns a description of every disallowed part of every Log call in [text]. */
 private fun logViolations(text: String): List<String> {
     val violations = mutableListOf<String>()
-    for (call in logCalls(text)) {
-        val oneLine = call.replace(Regex("\\s+"), " ")
-        if (topLevelArgumentCount(call) > 2) violations.add("more than tag and message: $oneLine")
-        for (match in bracedInterpolation.findAll(call)) {
+    for (range in logCallRanges(text)) {
+        val call = text.substring(range)
+        val shown = call.replace(Regex("\\s+"), " ")
+        val arguments = topLevelArguments(call)
+        if (arguments.size != LOG_ARGUMENT_COUNT) { violations.add("not exactly tag and message: $shown"); continue }
+        val tag = arguments[0]
+        if (tag != LOG_TAG_ARGUMENT && !stringLiteral.matches(tag)) violations.add("tag is neither TAG nor a literal: $shown")
+        val message = arguments[1]
+        if (!stringLiteral.matches(message)) { violations.add("message is not a single string literal: $shown"); continue }
+        for (match in bracedInterpolation.findAll(message)) {
             val expression = match.groupValues[1].trim()
-            if (allowedExpressions.none { it.matches(expression) }) violations.add("interpolation \${$expression} in $oneLine")
+            if (allowedExpressions.none { it.matches(expression) }) violations.add("interpolation \${$expression} in $shown")
         }
-        val withoutBraced = bracedInterpolation.replace(call, "")
-        for (match in bareInterpolation.findAll(withoutBraced)) {
-            if (match.groupValues[1] !in allowedBareNames) violations.add("interpolation \$${match.groupValues[1]} in $oneLine")
+        for (match in bareInterpolation.findAll(bracedInterpolation.replace(message, ""))) {
+            if (match.groupValues[1] !in allowedBareNames) violations.add("interpolation \$${match.groupValues[1]} in $shown")
         }
     }
     return violations
 }
 
+private val perFileLogCallFloor = mapOf("FlutterSharingIntentPlugin.kt" to 6, "MyFileDirectory.kt" to 5)
+
 private fun testLogAllowlist(scanDirectory: File) {
-    check("R-1 scanner flags a multi-line URI interpolation", logViolations("Log.w(TAG,\n  \"Rejected \${uri.scheme}\")").isNotEmpty())
-    check("R-1 scanner flags a payload interpolation", logViolations("Log.w(TAG, \"x \$value\")").isNotEmpty())
-    check("R-1 scanner flags a throwable argument", logViolations("Log.e(TAG, \"x\", t)").isNotEmpty())
-    check("R-1 scanner accepts the allowed forms", logViolations(
-        "Log.w(TAG, \"\$tag \${intent.action} \${intent.type} \${e.javaClass.simpleName} \${value?.length() ?: 0} \${list.size}\")").isEmpty())
+    fun flagged(source: String) = logViolations(source).isNotEmpty()
+    check("F-2 scanner flags a multi-line URI interpolation", flagged("Log.w(TAG,\n  \"Rejected \${uri.scheme}\")"))
+    check("F-2 scanner flags a payload interpolation", flagged("Log.w(TAG, \"x \$value\")"))
+    check("F-2 scanner flags string concatenation", flagged("Log.w(TAG, \"a\" + b)"))
+    check("F-2 scanner flags a bare expression message", flagged("Log.w(TAG, message)"))
+    check("F-2 scanner flags the throwable two-argument form", flagged("Log.w(TAG, e)"))
+    check("F-2 scanner flags a third argument", flagged("Log.e(TAG, \"x\", t)"))
+    check("F-2 scanner flags wtf with content", flagged("Log.wtf(TAG, \"x \$value\")"))
+    check("F-2 scanner flags println", flagged("Log.println(Log.WARN, TAG, \"x\")"))
+    check("F-2 scanner flags a computed tag", flagged("Log.w(tagFor(x), \"x\")"))
+    check("F-2 scanner flags the intent type", flagged("Log.w(TAG, \"t \${intent.type}\")"))
+    check("F-2 scanner accepts the allowed forms", !flagged(
+        "Log.w(TAG, \"\$tag \${e.javaClass.simpleName} \${value?.length() ?: 0} \${list.size}\")\nLog.wtf(\"Tag\", \"ok\")"))
 
     val sources = scanDirectory.walkTopDown().filter { it.extension == "kt" }.toList()
-    val allCalls = sources.flatMap { logCalls(it.readText()) }
-    check("R-1 the scan found Log calls (not vacuous)", allCalls.size >= MIN_EXPECTED_LOG_CALLS, "found ${allCalls.size}")
+    for ((name, floor) in perFileLogCallFloor) {
+        val file = sources.firstOrNull { it.name == name }
+        val count = file?.let { logCallRanges(it.readText()).size } ?: 0
+        check("F-2 the scan found the Log calls in $name (not vacuous)", count >= floor, "found $count, floor $floor")
+    }
     val offenders = sources.flatMap { file -> logViolations(file.readText()).map { "${file.name}: $it" } }
-    check("R-1 every Log call uses only allowed interpolations", offenders.isEmpty(), offenders.joinToString(" | "))
+    check("F-2 every Log call is two literals with allowed interpolations", offenders.isEmpty(), offenders.joinToString(" | "))
+}
+
+private fun guarded(name: String, body: () -> Unit) {
+    try {
+        body()
+    } catch (e: Throwable) {
+        check("$name completed without an uncaught ${e.javaClass.simpleName}", false, e.message ?: "")
+    }
 }
 
 fun main(args: Array<String>) {
-    testPrimaryDocumentIdCannotEscape()
-    testThirdPartyDocumentProviderNeverReturnsUriPath()
-    testNormalContentShareIsCopied()
-    testRejectedInputs()
-    testEachShareGetsItsOwnDirectory()
-    testExistingCacheFileIsNeverOverwritten()
-    testOversizedSourceLeavesNothingBehind()
-    testPruning()
-    testFailedCopiesLeaveNothingBehind()
-    testMultipleItemsAreAllOrNothing()
-    testMediaFailuresAreAbsorbed()
-    testRootsAreRecreated()
-    testRootThatIsAFileOrALink()
-    testRecursiveDeleteNeverFollowsLinks()
-    testPruneAgeBoundary()
-    testNullStreamRemovesItsDirectory()
-    testLogAllowlist(File(args[0]))
+    val scan = File(args[0])
+    guarded("1") { testPrimaryDocumentIdCannotEscape() }
+    guarded("2") { testThirdPartyDocumentProviderNeverReturnsUriPath() }
+    guarded("3") { testNormalContentShareIsCopied() }
+    guarded("rejected") { testRejectedInputs() }
+    guarded("R-2") { testEachShareGetsItsOwnDirectory() }
+    guarded("overwrite") { testExistingCacheFileIsNeverOverwritten() }
+    guarded("cap") { testOversizedSourceLeavesNothingBehind() }
+    guarded("prune") { testPruning() }
+    guarded("I-1") { testFailedCopiesLeaveNothingBehind() }
+    guarded("multi") { testMultipleItemsAreAllOrNothing() }
+    guarded("media") { testMediaFailuresAreAbsorbed() }
+    guarded("roots") { testRootsAreRecreated() }
+    guarded("M-1") { testRootThatIsAFileOrALink() }
+    guarded("M-2") { testRecursiveDeleteNeverFollowsLinks() }
+    guarded("ttl") { testPruneAgeBoundary() }
+    guarded("M-3") { testNullStreamRemovesItsDirectory() }
+    guarded("F-3") { testDeleteContinuesAfterAFailure() }
+    guarded("F-4") { testThumbnailWriting() }
+    guarded("A-2") { testCleanupRemovesOnlyOwnedFiles() }
+    guarded("F-1") { testNoApi26Calls(scan) }
+    guarded("F-2") { testLogAllowlist(scan) }
     println(if (failures == 0) "ALL PASS" else "FAILURES: $failures")
     System.exit(failures)
 }

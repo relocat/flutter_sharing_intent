@@ -24,7 +24,6 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.FileOutputStream
 import java.net.URLConnection
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -102,12 +101,17 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
         result.success(null)
       }
       "cleanup" -> {
-        // Android: no-op. Plaintext-gap (FSI-31) only applies to iOS App
-        // Group containers. Shared files are copied into per-share
-        // directories under cacheDir/flutter_sharing_intent/ (FSI-102); the
-        // plugin prunes stale ones itself on the next share, and the OS may
-        // reclaim cacheDir at any time.
-        result.success(null)
+        // Deletes only the plugin's own copies below cacheDir (shared files
+        // and thumbnails); every other path is refused (FSI-104).
+        val paths = call.argument<List<String>>("paths")
+        if (paths == null) {
+          result.error("INVALID_ARGUMENT", "cleanup requires paths: [String]", null)
+          return
+        }
+        backgroundExecutor.execute {
+          MyFileDirectory.removeOwnedFiles(applicationContext.cacheDir, paths)
+          mainHandler.post { result.success(null) }
+        }
       }
       else -> result.notImplemented()
     }
@@ -135,7 +139,7 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
     val intentFlags = intent.getFlags()
     if ((intentFlags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return
 
-    Log.w(TAG, "handleIntent ==>> ${intent.action}, ${intent.type}")
+    Log.w(TAG, "handleIntent")
     val tag: String = when {
       (intent.type?.startsWith("text") != true)
           && (intent.action == Intent.ACTION_SEND
@@ -203,17 +207,25 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
       else -> return null
     }
 
-    // All-or-nothing: if anything below fails, every copy made for this
-    // intent is deleted before the payload is dropped (FSI-104).
+    // All-or-nothing: if anything below fails, every copy and thumbnail made
+    // for this intent is deleted before the payload is dropped (FSI-104).
     val paths = MyFileDirectory.getAbsolutePaths(applicationContext, uris)
+    val thumbnails = mutableListOf<String>()
     var isBuilt = false
     try {
       val items = JSONArray()
-      for (path in paths) items.put(buildFileItem(path))
+      for (path in paths) {
+        val item = buildFileItem(path)
+        if (item.has("thumbnail")) thumbnails.add(item.getString("thumbnail"))
+        items.put(item)
+      }
       isBuilt = true
       return if (intent.action == Intent.ACTION_SEND && items.length() == 0) null else items
     } finally {
-      if (!isBuilt) MyFileDirectory.deleteShareCopies(paths)
+      if (!isBuilt) {
+        MyFileDirectory.removeOwnedFiles(applicationContext.cacheDir, thumbnails)
+        MyFileDirectory.deleteShareCopies(paths)
+      }
     }
   }
 
@@ -292,18 +304,13 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
 
     val bitmap = ThumbnailUtils.createVideoThumbnail(path, MediaStore.Video.Thumbnails.MINI_KIND)
       ?: return null
-    val targetFile = MyFileDirectory.newThumbnailFile(applicationContext.cacheDir)
-    var isWritten = false
     try {
-      FileOutputStream(targetFile).use { out ->
+      return MyFileDirectory.writeThumbnail(applicationContext.cacheDir) { out ->
         bitmap.compress(Bitmap.CompressFormat.PNG, THUMBNAIL_PNG_QUALITY, out)
       }
-      isWritten = true
     } finally {
       bitmap.recycle()
-      if (!isWritten) targetFile.delete()
     }
-    return targetFile.path
   }
 
   private fun getDuration(path: String, type: MediaType): Long? {

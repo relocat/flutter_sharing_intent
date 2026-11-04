@@ -38,8 +38,9 @@ class FlutterSharingIntent {
 
   /// Delete the App Group container copies of previously-received shared
   /// files. Call this after your app has fully ingested the data (e.g.,
-  /// encrypted it into a safer store). On Android this is a no-op because
-  /// the plugin does not hold container copies there.
+  /// encrypted it into a safer store). On iOS only files in the plugin's
+  /// App Group directories are deleted; on Android only the plugin's own
+  /// cache copies and thumbnails are. Every other path is ignored.
   ///
   /// This API addresses the iOS plaintext-gap (FSI-31): the iOS Share
   /// Extension copies shared files into the App Group container, and

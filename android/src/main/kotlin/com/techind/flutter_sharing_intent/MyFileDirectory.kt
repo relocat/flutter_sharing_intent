@@ -5,17 +5,14 @@ package com.techind.flutter_sharing_intent
 import android.content.Context
 import android.database.Cursor
 import android.net.Uri
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import android.webkit.MimeTypeMap
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.nio.file.FileVisitResult
-import java.nio.file.Files
-import java.nio.file.LinkOption
-import java.nio.file.Path
-import java.nio.file.SimpleFileVisitor
-import java.nio.file.attribute.BasicFileAttributes
 import java.util.*
 
 /**
@@ -53,6 +50,8 @@ object MyFileDirectory {
     const val THUMBNAIL_CACHE_DIR_NAME: String = "flutter_sharing_intent_thumbnails"
 
     private const val THUMBNAIL_SUFFIX = ".png"
+    private const val SHARE_PATH_SEGMENTS = 3
+    private const val THUMBNAIL_PATH_SEGMENTS = 2
     private const val DISPLAY_NAME_COLUMN = "_display_name"
     private const val COPY_BUFFER_BYTES = 8192
     private const val BYTES_PER_MIB = 1024 * 1024
@@ -113,15 +112,24 @@ object MyFileDirectory {
     /**
      * Deletes the per-share directory of each copy in [paths]. Only paths of
      * the exact form `<root>/<UUID>/<file>` are honoured, and links are never
-     * followed (FSI-104).
+     * followed (FSI-104). A failure on one item never stops the others: the
+     * first failure is rethrown after the loop with the rest suppressed.
      */
     fun deleteShareCopies(paths: List<String>) {
+        var firstFailure: IOException? = null
         for (path in paths) {
             val shareDirectory = File(path).parentFile ?: continue
             val isShareDirectory = UUID_PATTERN.matches(shareDirectory.name) &&
                 shareDirectory.parentFile?.name == SHARE_CACHE_DIR_NAME
-            if (isShareDirectory) deleteWithoutFollowingLinks(shareDirectory)
+            if (!isShareDirectory) continue
+            try {
+                deleteWithoutFollowingLinks(shareDirectory)
+            } catch (e: IOException) {
+                val earlier = firstFailure
+                if (earlier == null) firstFailure = e else earlier.addSuppressed(e)
+            }
         }
+        firstFailure?.let { throw it }
     }
 
     /**
@@ -264,6 +272,28 @@ object MyFileDirectory {
         return File(root, "${UUID.randomUUID()}.png")
     }
 
+    /** What a path is, judged WITHOUT following a final symbolic link. */
+    internal enum class EntryType { MISSING, LINK, DIRECTORY, FILE, OTHER }
+
+    /**
+     * Classifies [file] with `lstat`, so a symbolic link is reported as
+     * [EntryType.LINK] and never followed (FSI-104). Uses only API 21 calls.
+     */
+    internal fun entryType(file: File): EntryType {
+        try {
+            val mode = Os.lstat(file.path).st_mode
+            return when {
+                OsConstants.S_ISLNK(mode) -> EntryType.LINK
+                OsConstants.S_ISDIR(mode) -> EntryType.DIRECTORY
+                OsConstants.S_ISREG(mode) -> EntryType.FILE
+                else -> EntryType.OTHER
+            }
+        } catch (e: ErrnoException) {
+            if (e.errno == OsConstants.ENOENT || e.errno == OsConstants.ENOTDIR) return EntryType.MISSING
+            throw IOException("flutter_sharing_intent: cannot inspect cache entry (errno ${e.errno})")
+        }
+    }
+
     /**
      * Makes sure [directory] exists as a real directory and returns it
      * (FSI-104). A symbolic link in its place is never followed: the call
@@ -271,14 +301,14 @@ object MyFileDirectory {
      * leftover from an older layout cannot block sharing.
      */
     internal fun ensureDirectory(directory: File): File {
-        val path = directory.toPath()
-        if (Files.isSymbolicLink(path)) {
-            throw IOException("flutter_sharing_intent: cache root is a symbolic link")
+        when (entryType(directory)) {
+            EntryType.DIRECTORY -> return directory
+            EntryType.LINK -> throw IOException("flutter_sharing_intent: cache root is a symbolic link")
+            EntryType.MISSING -> Unit
+            else -> if (!directory.delete()) throw IOException("flutter_sharing_intent: cannot replace cache root")
         }
-        if (directory.exists() && !directory.isDirectory && !directory.delete()) {
-            throw IOException("flutter_sharing_intent: cannot replace cache root")
-        }
-        if (!directory.isDirectory && !directory.mkdirs()) {
+        directory.mkdirs()
+        if (entryType(directory) != EntryType.DIRECTORY) {
             throw IOException("flutter_sharing_intent: cannot create cache root")
         }
         return directory
@@ -287,21 +317,97 @@ object MyFileDirectory {
     /**
      * Deletes [target] and everything below it WITHOUT following symbolic
      * links: a link is removed itself and its target is left alone (FSI-104).
+     * Manual recursion over API 21 calls: each entry is classified with
+     * `lstat`, only real directories are descended into, and `File.delete`
+     * removes links as links. Errors do not stop the walk; the first one is
+     * thrown at the end with the others suppressed, and a parent that cannot
+     * be removed because a child failed adds no error of its own.
      */
     internal fun deleteWithoutFollowingLinks(target: File) {
-        val path = target.toPath()
-        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return
-        Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
-            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                Files.delete(file)
-                return FileVisitResult.CONTINUE
-            }
+        val failures = mutableListOf<IOException>()
+        deleteEntry(target, failures)
+        val first = failures.firstOrNull() ?: return
+        failures.drop(1).forEach { first.addSuppressed(it) }
+        throw first
+    }
 
-            override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
-                Files.delete(dir)
-                return FileVisitResult.CONTINUE
+    private fun deleteEntry(entry: File, failures: MutableList<IOException>) {
+        val type = try {
+            entryType(entry)
+        } catch (e: IOException) {
+            failures.add(e)
+            return
+        }
+        if (type == EntryType.MISSING) return
+        if (type == EntryType.DIRECTORY) {
+            val children = entry.list()
+            if (children == null) {
+                failures.add(IOException("flutter_sharing_intent: cannot list cache directory"))
+                return
             }
-        })
+            children.forEach { deleteEntry(File(entry, it), failures) }
+        }
+        if (!entry.delete() && failures.isEmpty()) {
+            failures.add(IOException("flutter_sharing_intent: cannot delete cache entry"))
+        }
+    }
+
+    /**
+     * Writes a video thumbnail through [compress] into a fresh file in the
+     * thumbnail root and returns its path (FSI-104). A `false` result or an
+     * exception from [compress] deletes the file and yields null (or
+     * rethrows), so a failed write never leaves a partial thumbnail.
+     */
+    internal fun writeThumbnail(cacheDir: File, compress: (java.io.OutputStream) -> Boolean): String? {
+        val target = newThumbnailFile(cacheDir)
+        var isWritten = false
+        try {
+            FileOutputStream(target).use { out -> isWritten = compress(out) }
+        } finally {
+            if (!isWritten) target.delete()
+        }
+        return if (isWritten) target.path else null
+    }
+
+    /**
+     * Deletes the plugin's own copies named in [paths] and returns how many
+     * files were removed (A-2, FSI-104). Only two shapes are owned, both
+     * directly below [cacheDir]: a regular file `flutter_sharing_intent/<UUID>/<name>`
+     * (its emptied directory is then removed, non-recursively) and a regular
+     * file `flutter_sharing_intent_thumbnails/<UUID>.png`. Everything else, and
+     * any path through a symbolic link, is refused.
+     */
+    fun removeOwnedFiles(cacheDir: File, paths: List<String>): Int {
+        var removed = 0
+        for (path in paths) {
+            val owned = ownedFile(cacheDir, path) ?: continue
+            if (!owned.delete()) continue
+            removed++
+            if (owned.parentFile?.name != THUMBNAIL_CACHE_DIR_NAME) owned.parentFile?.delete()
+        }
+        return removed
+    }
+
+    /** Returns the file for [path] if it is an owned regular file below real directories, else null. */
+    private fun ownedFile(cacheDir: File, path: String): File? {
+        val prefix = cacheDir.path + "/"
+        if (!path.startsWith(prefix)) return null
+        val segments = path.removePrefix(prefix).split("/")
+        if (segments.any { it.isEmpty() || it == "." || it == ".." }) return null
+        val isShareFile = segments.size == SHARE_PATH_SEGMENTS && segments[0] == SHARE_CACHE_DIR_NAME &&
+            UUID_PATTERN.matches(segments[1]) && sanitizeDisplayName(segments[2]) == segments[2]
+        val isThumbnail = segments.size == THUMBNAIL_PATH_SEGMENTS && segments[0] == THUMBNAIL_CACHE_DIR_NAME &&
+            segments[1].endsWith(THUMBNAIL_SUFFIX) && UUID_PATTERN.matches(segments[1].removeSuffix(THUMBNAIL_SUFFIX))
+        if (!isShareFile && !isThumbnail) return null
+        return try {
+            val directories = (1 until segments.size).map { File(cacheDir, segments.take(it).joinToString("/")) }
+            val file = File(cacheDir, segments.joinToString("/"))
+            val isReal = directories.all { entryType(it) == EntryType.DIRECTORY } &&
+                entryType(file) == EntryType.FILE
+            if (isReal) file else null
+        } catch (e: IOException) {
+            null
+        }
     }
 
     /**
@@ -309,7 +415,8 @@ object MyFileDirectory {
      * [CACHE_ENTRY_TTL_MILLIS] ago. Only entries this plugin could have
      * created are touched: UUID-named directories under the share root, or
      * `.png` files under the thumbnail root. Symbolic links are neither
-     * followed nor deleted. Best-effort: a failure is logged without any path.
+     * followed nor deleted. Best-effort: a failure on one entry is logged
+     * without any path and the remaining entries are still pruned.
      */
     internal fun pruneStaleEntries(
         root: File,
@@ -317,20 +424,26 @@ object MyFileDirectory {
         nowMillis: Long = System.currentTimeMillis(),
     ) {
         val cutoff = nowMillis - CACHE_ENTRY_TTL_MILLIS
-        try {
-            root.listFiles()?.forEach { entry ->
-                if (Files.isSymbolicLink(entry.toPath()) || entry.lastModified() >= cutoff) return@forEach
+        val entries = try {
+            root.listFiles()
+        } catch (e: SecurityException) {
+            Log.w("FlutterSharingIntent", "Cache prune failed: ${e.javaClass.simpleName}")
+            null
+        } ?: return
+        for (entry in entries) {
+            try {
+                if (entryType(entry) == EntryType.LINK || entry.lastModified() >= cutoff) continue
                 val isOurs = if (requireUuidDirectories) {
                     entry.isDirectory && UUID_PATTERN.matches(entry.name)
                 } else {
                     entry.isFile && entry.name.endsWith(THUMBNAIL_SUFFIX)
                 }
                 if (isOurs) deleteWithoutFollowingLinks(entry)
+            } catch (e: IOException) {
+                Log.w("FlutterSharingIntent", "Cache prune failed: ${e.javaClass.simpleName}")
+            } catch (e: SecurityException) {
+                Log.w("FlutterSharingIntent", "Cache prune failed: ${e.javaClass.simpleName}")
             }
-        } catch (e: IOException) {
-            Log.w("FlutterSharingIntent", "Cache prune failed: ${e.javaClass.simpleName}")
-        } catch (e: SecurityException) {
-            Log.w("FlutterSharingIntent", "Cache prune failed: ${e.javaClass.simpleName}")
         }
     }
 

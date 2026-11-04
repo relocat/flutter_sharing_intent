@@ -12,6 +12,11 @@ variant "control" : negative control. isRegularFile is replaced by a stub that
                     accepts everything (the behaviour before FSI-103).
 variant "nowiring": negative control. The isRegularFile guard is deleted from
                     removeOwnedFiles (the wiring), so the wiring tests must fail.
+variant "noreal"  : negative control. The real-directory guard is deleted, so a
+                    symlinked plugin root would redirect deletes.
+variant "noleaf"  : negative control. Any thumbnail leaf name is accepted.
+variant "rawstrip": negative control. file:// identifiers are converted by
+                    textual stripping (no percent-decoding).
 variant "noscope" : negative control. The ownership guard is deleted from
                     removeOwnedFiles, so files outside the plugin layout would
                     be removed and the scope tests must fail.
@@ -51,6 +56,12 @@ a, b, relative = block(plugin, "    static func relativeComponents(")
 report("relativeComponents", plugin, a, b, relative)
 a, b, emptydir = block(plugin, "    static func removeEmptyShareDirectory(")
 report("removeEmptyShareDirectory", plugin, a, b, emptydir)
+a, b, leaf = block(plugin, "    static func isThumbnailLeaf(")
+report("isThumbnailLeaf", plugin, a, b, leaf)
+a, b, realdirs = block(plugin, "    static func hasRealOwnedDirectories(")
+report("hasRealOwnedDirectories", plugin, a, b, realdirs)
+a, b, filepath = block(plugin, "    static func filePath(fromFileIdentifier")
+report("filePath", plugin, a, b, filepath)
 a, b, remover = block(plugin, "    static func removeOwnedFiles(")
 report("removeOwnedFiles", plugin, a, b, remover)
 constants = "".join(line(plugin, prefix) + "\n" for prefix in ("    static let kShareRootName", "    static let kThumbnailRootName"))
@@ -63,9 +74,22 @@ if variant == "control":
     regular = "    static func isRegularFile(atPath path: String) -> Bool {\n        return true\n    }\n"
 elif variant == "nowiring":
     # Delete the isRegularFile guard from removeOwnedFiles.
-    stripped = re.sub(r"            guard Self\.isRegularFile\(atPath: p\) else \{\n.*?\n            \}\n", "", remover, count=1, flags=re.S)
+    stripped = re.sub(r"            guard Self\.isRegularFile\(atPath: standardized\) else \{\n.*?\n            \}\n", "", remover, count=1, flags=re.S)
     assert stripped != remover, "isRegularFile guard not found"
     remover = stripped
+elif variant == "noreal":
+    # Delete the real-directory guard (symlinked plugin roots) from removeOwnedFiles.
+    stripped = re.sub(r"            guard Self\.hasRealOwnedDirectories\(path: standardized, containerURL: containerURL\) else \{\n.*?\n            \}\n", "", remover, count=1, flags=re.S)
+    assert stripped != remover, "real-directory guard not found"
+    remover = stripped
+elif variant == "noleaf":
+    # Accept any thumbnail leaf name instead of <UUID>.jpg.
+    leaf = "    static func isThumbnailLeaf(_ name: String) -> Bool {\n        return true\n    }\n"
+elif variant == "rawstrip":
+    # Old behaviour: strip the scheme textually instead of decoding the URL.
+    stripped = filepath.replace('URL(string: identifier)?.path', 'identifier.replacingOccurrences(of: "file://", with: "")')
+    assert stripped != filepath, "URL(string:) conversion not found"
+    filepath = stripped
 elif variant == "noscope":
     # Delete the ownership guard from removeOwnedFiles.
     stripped = re.sub(r"            guard Self\.isPluginOwnedPath\(path: p, containerURL: containerURL\) else \{\n.*?\n            \}\n", "", remover, count=1, flags=re.S)
@@ -73,7 +97,7 @@ elif variant == "noscope":
     remover = stripped
 with open(os.path.join(out, "ContainerGuard.swift"), "w") as f:
     f.write("import Foundation\n\npublic enum ContainerGuard {\n" + constants + "// BEGIN VERBATIM\n"
-            + guard + regular + owned + relative + emptydir + "    @discardableResult\n" + remover + "// END VERBATIM\n}\n")
+            + guard + regular + leaf + realdirs + owned + relative + emptydir + filepath + "    @discardableResult\n" + remover + "// END VERBATIM\n}\n")
 
 a, b, sanitizer = block(controller, "    private func sanitizedComponent(")
 report("sanitizedComponent", controller, a, b, sanitizer)

@@ -41,8 +41,10 @@ abstract class FlutterSharingIntentPlatform extends PlatformInterface {
 
   /// Deletes the listed App Group container file paths. Use after your app
   /// has finished reading the shared files to minimize on-disk plaintext
-  /// exposure (FSI-31). On Android this is a no-op because the plugin does
-  /// not hold container copies there.
+  /// exposure (FSI-31). On iOS only files the share extension wrote into the
+  /// plugin directories of the App Group container are deleted; on Android
+  /// only the plugin's own copies and thumbnails in the cache directory are.
+  /// Every other path is ignored.
   Future<void> cleanup(List<String> paths) {
     throw UnimplementedError('cleanup() has not been implemented.');
   }
