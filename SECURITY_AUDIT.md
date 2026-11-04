@@ -60,9 +60,9 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 | `android/src/main/kotlin/com/techind/flutter_sharing_intent/FlutterSharingIntentPlugin.kt` | 240 | `getSharingText` — `intent.getStringExtra(Intent.EXTRA_TEXT)` | **untrusted** — arbitrary text from external app; no length cap. |
 | `android/src/main/kotlin/com/techind/flutter_sharing_intent/FlutterSharingIntentPlugin.kt` | 251 | `getSharingText` — `intent.getStringArrayListExtra(Intent.EXTRA_TEXT)` | **untrusted** — list of text strings from external app; no count or total-size cap. |
 | `android/src/main/kotlin/com/techind/flutter_sharing_intent/FlutterSharingIntentPlugin.kt` | 365–379 | `onListen(arguments, events)` — `EventChannel.StreamHandler` | **in-app** — Dart subscribes to the sharing event stream; `arguments` value compared against literal `"sharing"`. |
-| `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` | 35–93 | `getAbsolutePath(context, uri)` | **untrusted** — full URI resolution path; scheme is validated (non-`content://` rejected at line 40), but the `docId` string parsed at lines 51–55 and the `id` from `DocumentsContract` at line 61–63 come directly from the URI supplied by the external app. |
-| `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` | 105–160 | `getDataColumn` — `contentResolver.query(uri, ...)` | **untrusted** — issues a `ContentResolver.query` against an authority from the external app's URI; the `_display_name` returned by the provider is used directly as a filename for the cache-file at line 119. |
-| `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` | 138–143 | `getDataColumn` — `contentResolver.openInputStream(uri)` | **untrusted** — opens a byte stream from a provider-controlled URI and copies to app cache; no size limit enforced. |
+| `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` | — | `getAbsolutePath(context, uri)` | **untrusted** — the URI and its path segments come from the external app; scheme is validated (see FSI-21, FSI-100). |
+| `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` | — | `getDataColumn` — `contentResolver.query(uri, ...)` | **untrusted** — queries a provider chosen by the external app; the returned display name is provider-supplied (see FSI-91). |
+| `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` | — | `getDataColumn` — `contentResolver.openInputStream(uri)` | **untrusted** — reads a provider-controlled stream into the app cache (see FSI-90). |
 
 ### iOS native (plugin layer)
 
@@ -71,10 +71,10 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 | `ios/Classes/FSIShareViewController.swift` | 122–219 | `processAttachments` — `extensionContext?.inputItems` | **untrusted** — reads `NSExtensionItem` attachments delivered by the host OS from the sharing source app; this is the primary ingestion point for all shared media. |
 | `ios/Classes/FSIShareViewController.swift` | 134–207 | `processAttachments` — `provider.loadItem(forTypeIdentifier:...)` (image / movie / file / url / text / data / item) | **untrusted** — loads raw attachment data (URL, UIImage, Data, String) supplied by the source app's share extension for each type identifier; no size cap before `loadItem` is dispatched. |
 | `ios/Classes/FSIShareViewController.swift` | 84–99 | `didSelectPost` — `self.contentText` | **untrusted** — text entered by the user in the share sheet compose field (SLComposeServiceViewController); treated as-is, no length cap. |
-| `ios/Classes/FSIShareViewController.swift` | 240–258 | `handleImageItem` — copies URL, UIImage, or raw Data to App Group container | **untrusted** — attachment payload; raw `Data` written verbatim to container at line 288–290 without size check. |
-| `ios/Classes/FSIShareViewController.swift` | 261–273 | `handleVideoItem` — copies video URL to App Group container | **untrusted** — source URL from attachment; filename derived from `url.lastPathComponent` (attacker-controlled) at line 369. |
-| `ios/Classes/FSIShareViewController.swift` | 275–294 | `handleFileItem` — copies file URL or raw Data to App Group container | **untrusted** — raw `Data` path writes an attacker-sized blob to the App Group container (line 287–290) with no size limit. |
-| `ios/Classes/FSIShareViewController.swift` | 368–372 | `getFileName(from:type:)` — `url.lastPathComponent` | **untrusted** — filename derived from attacker-controlled URL; used directly as the destination filename in the App Group container. |
+| `ios/Classes/FSIShareViewController.swift` | — | `handleImageItem` — copies URL, UIImage, or raw Data to App Group container | **untrusted** — attachment payload (see FSI-92). |
+| `ios/Classes/FSIShareViewController.swift` | — | `handleVideoItem` — copies video URL to App Group container | **untrusted** — source URL from the attachment (see FSI-93). |
+| `ios/Classes/FSIShareViewController.swift` | — | `handleFileItem` — copies file URL or raw Data to App Group container | **untrusted** — file URL or raw `Data` from the attachment (see FSI-92, FSI-93). |
+| `ios/Classes/FSIShareViewController.swift` | — | `getFileName(from:type:)` — `url.lastPathComponent` | **untrusted** — file name derived from the source URL (see FSI-93). |
 | `ios/Classes/FSIShareViewController.swift` | 315–325 | `saveAndRedirect` — `UserDefaults(suiteName: appGroupId).set(data, forKey: kUserDefaultsKey)` | **in-app** (main→extension) — writes JSON-encoded `[SharingFile]` into the App Group shared UserDefaults; read by the main app. |
 | `ios/Classes/SwiftFlutterSharingIntentPlugin.swift` | 207–227 | `application(_:didFinishLaunchingWithOptions:)` — `launchOptions[.url]` and `launchOptions[.userActivityDictionary]` | **in-app** (OS→main app) — receives the redirect URL or NSUserActivity that the share extension sent via `redirectToHostApp`; scheme prefix validated by `hasSameSchemePrefix`. |
 | `ios/Classes/SwiftFlutterSharingIntentPlugin.swift` | 234–239 | `application(_:open:url:options:)` — `open url: URL` | **in-app** (OS→main app) — warm-start URL open callback; scheme prefix validated before `handleUrl`. |
@@ -234,7 +234,7 @@ The following issues were identified during C2/C3 but are not fixed in this audi
 ### R-SI-01: getParcelableArrayListExtra URI count cap (Android)
 
 **File:** `FlutterSharingIntentPlugin.kt` line 216
-**Risk:** A malicious source app can provide an unbounded list of URIs via `EXTRA_STREAM`. Each URI triggers a ContentResolver stream copy; with many URIs the aggregate I/O and storage cost could be significant.
+**Risk:** The number of URIs in one share is not capped by the plugin; the host app enforces a batch cap.
 **Justification for deferral:** Host apps should enforce a batch cap at their service layer. The plugin's 16 MiB per-file cap (FSI-90) limits per-file damage. Fixing this at the plugin layer requires duplicating a policy decision that belongs to the host app. Tracked as a host-app-level control, not a plugin fix.
 **Owner:** host app service layer.
 
@@ -456,6 +456,6 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
   - A failing cleanup never replaces the original error; it is attached as suppressed.
   - Independent delete failures in different subtrees are all recorded.
   - `cleanup` always replies and returns the number of files removed, on both platforms.
-  - The descriptions of FSI-90..94 no longer include reproduction steps.
+  - The descriptions of FSI-90..94 are descriptive only.
 - **Example app.** `example/ios/Share Extension/FSIShareViewController.swift` is now a copy of the
   hardened `ios/Classes/FSIShareViewController.swift`, and the README setup step points there.

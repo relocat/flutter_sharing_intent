@@ -114,7 +114,8 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
           try {
             removed = MyFileDirectory.removeOwnedFiles(applicationContext.cacheDir, paths)
             isDone = true
-          } catch (e: SecurityException) {
+          } catch (e: RuntimeException) {
+            // SecurityException included: nothing may escape the executor.
             Log.w(TAG, "cleanup failed: ${e.javaClass.simpleName}")
           } finally {
             // A reply is ALWAYS posted, so the Dart future never hangs.
@@ -223,8 +224,7 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
     val paths = MyFileDirectory.getAbsolutePaths(applicationContext, uris)
     val thumbnails = mutableListOf<String>()
     return MyFileDirectory.withCleanup(cleanup = {
-      MyFileDirectory.removeOwnedFiles(applicationContext.cacheDir, thumbnails)
-      MyFileDirectory.deleteShareCopies(paths)
+      MyFileDirectory.discardFailedShare(applicationContext.cacheDir, thumbnails, paths)
     }) {
       val items = JSONArray()
       for (path in paths) items.put(buildFileItem(path, thumbnails))

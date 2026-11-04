@@ -440,6 +440,23 @@ private fun testThumbnailIsRecordedBeforeTheDurationStep() {
     check("L-1 a failing thumbnail still yields the duration", details.thumbnail == null && details.duration == 5L)
 }
 
+// L-D: a failure while removing thumbnails must not stop the copies from being removed.
+private fun testDiscardRunsBothStepsEvenIfTheFirstFails() {
+    val context = freshContext()
+    val uri = "content://p.a/1"
+    context.register(uri, "a.txt", "x".toByteArray())
+    val copy = MyFileDirectory.getAbsolutePath(context, Uri.parse(uri))!!
+    val failingCacheDir = object : File(context.cacheDir.path) {
+        override fun getPath(): String = throw SecurityException("denied")
+    }
+    val threw = try { MyFileDirectory.discardFailedShare(failingCacheDir, listOf("$copy.png"), listOf(copy)); false } catch (e: SecurityException) { true }
+    check("L-D the first step's failure propagates", threw)
+    check("L-D the copies were still removed", !File(copy).parentFile.exists())
+    val ok = MyFileDirectory.getAbsolutePath(context, Uri.parse(uri))!!
+    MyFileDirectory.discardFailedShare(context.cacheDir, emptyList(), listOf(ok))
+    check("L-D a normal discard removes the copies", !File(ok).parentFile.exists())
+}
+
 // L-8: a symlinked per-share directory is refused by cleanup.
 private fun testCleanupRefusesSymlinkedShareDirectory() {
     val context = freshContext()
@@ -601,6 +618,7 @@ fun main(args: Array<String>) {
     guarded("A-2") { testCleanupRemovesOnlyOwnedFiles() }
     guarded("L-2") { testThumbnailCloseFailure() }
     guarded("L-1") { testThumbnailIsRecordedBeforeTheDurationStep() }
+    guarded("L-D") { testDiscardRunsBothStepsEvenIfTheFirstFails() }
     guarded("L-8") { testCleanupRefusesSymlinkedShareDirectory() }
     guarded("F-1") { testNoApi26Calls(scan) }
     guarded("F-2") { testLogAllowlist(scan) }

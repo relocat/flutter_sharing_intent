@@ -19,6 +19,7 @@ the modifications are licensed under Apache-2.0:
   lib/flutter_sharing_intent_platform_interface.dart
   lib/model/sharing_file.dart
   pubspec.yaml
+  test/flutter_sharing_intent_method_channel_test.dart
   test/flutter_sharing_intent_test.dart
   test/sharing_file_test.dart (new)
 See the git history for details.

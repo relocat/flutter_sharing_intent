@@ -26,7 +26,7 @@ object MyFileDirectory {
 
     /**
      * Hard per-file ceiling for content streamed via ContentResolver (FSI-90).
-     * A malicious source app can offer an unbounded stream; this cap ensures
+     * An untrusted source app can offer an unbounded stream; this cap ensures
      * we abort and clean up rather than fill the host app's cacheDir.
      *
      * A host app cannot raise this limit at runtime: changing it means editing
@@ -121,6 +121,19 @@ object MyFileDirectory {
                 original.addSuppressed(cleanupFailure)
             }
             throw original
+        }
+    }
+
+    /**
+     * Deletes everything created for a share that is being dropped: its
+     * thumbnails first, then its copies. A failure while removing thumbnails
+     * never prevents the copies from being removed (FSI-106).
+     */
+    fun discardFailedShare(cacheDir: File, thumbnails: List<String>, copies: List<String>) {
+        try {
+            removeOwnedFiles(cacheDir, thumbnails)
+        } finally {
+            deleteShareCopies(copies)
         }
     }
 

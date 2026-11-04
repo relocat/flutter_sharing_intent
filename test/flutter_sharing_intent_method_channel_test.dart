@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified by Relocat (2026); see NOTICE.
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_sharing_intent/flutter_sharing_intent_method_channel.dart';

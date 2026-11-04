@@ -18,7 +18,7 @@ final class ContainerGuardTests: XCTestCase {
 
     func testDotDotEscapeIsRejected() {
         XCTAssertFalse(inside(containerPath + "/../x"))
-        XCTAssertFalse(inside(containerPath + "/../../../../etc/passwd"))
+        XCTAssertFalse(inside(containerPath + "/../../../../outside/x"))
         XCTAssertFalse(inside(containerPath + "/sub/../../x"))
     }
 
@@ -27,7 +27,7 @@ final class ContainerGuardTests: XCTestCase {
     }
 
     func testSiblingSharingThePrefixIsRejected() {
-        XCTAssertFalse(inside(containerPath + "-evil/x"))
+        XCTAssertFalse(inside(containerPath + "-sibling/x"))
         XCTAssertFalse(inside(containerPath + "X"))
         XCTAssertFalse(inside(containerPath + "X/file"))
     }
@@ -43,7 +43,7 @@ final class ContainerGuardTests: XCTestCase {
         XCTAssertFalse(inside(containerPath + "/"))
         let slashContainer = URL(fileURLWithPath: containerPath + "/")
         XCTAssertTrue(inside(containerPath + "/file", slashContainer))
-        XCTAssertFalse(inside(containerPath + "-evil/file", slashContainer))
+        XCTAssertFalse(inside(containerPath + "-sibling/file", slashContainer))
     }
 
     func testRepeatedSlashes() {
@@ -64,7 +64,7 @@ final class ContainerGuardTests: XCTestCase {
 
     func testRootAndUnrelatedPathsAreRejected() {
         XCTAssertFalse(inside("/"))
-        XCTAssertFalse(inside("/etc/passwd"))
+        XCTAssertFalse(inside("/outside/x"))
         XCTAssertFalse(inside("/var/mobile/Containers/Shared/AppGroup"))
     }
 
@@ -74,7 +74,7 @@ final class ContainerGuardTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("fsi-guard-\(UUID().uuidString)", isDirectory: true)
         let c = root.appendingPathComponent("group", isDirectory: true)
-        let o = root.appendingPathComponent("group-evil", isDirectory: true)
+        let o = root.appendingPathComponent("group-sibling", isDirectory: true)
         try FileManager.default.createDirectory(at: c.appendingPathComponent("sub"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: o, withIntermediateDirectories: true)
         try Data("x".utf8).write(to: c.appendingPathComponent("sub/file.bin"))
@@ -91,7 +91,7 @@ final class ContainerGuardTests: XCTestCase {
     func testRealSiblingAndEscapeAreRejected() throws {
         let t = try makeTree()
         XCTAssertFalse(inside(t.outside.appendingPathComponent("secret.txt").path, t.container))
-        XCTAssertFalse(inside(t.container.path + "/../group-evil/secret.txt", t.container))
+        XCTAssertFalse(inside(t.container.path + "/../group-sibling/x.txt", t.container))
         XCTAssertFalse(inside(t.container.path, t.container))
     }
 

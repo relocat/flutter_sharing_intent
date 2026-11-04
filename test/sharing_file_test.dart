@@ -4,7 +4,7 @@ import 'package:flutter_sharing_intent/model/sharing_file.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 // Tests for FSI-94: SharedFile.fromJson must not crash on out-of-range
-// or non-integer 'type' values from an attacker-controlled EventChannel payload.
+// or non-integer 'type' values from an untrusted EventChannel payload.
 void main() {
   group('SharedFile.fromJson type field guard (FSI-94)', () {
     test('valid index 0 (TEXT) decodes correctly', () {

@@ -64,8 +64,8 @@ class SharedFile {
 /// Safely decode a [SharedMediaType] from a raw JSON integer (FSI-94).
 ///
 /// Direct indexing via `SharedMediaType.values[n]` throws [RangeError] for
-/// any value outside the valid range; that crash can be triggered by a
-/// malicious share source controlling the EventChannel payload. Returns
+/// any value outside the valid range; that crash can be triggered by an
+/// untrusted share source controlling the EventChannel payload. Returns
 /// [SharedMediaType.FILE] as a conservative fallback for unknown indices.
 SharedMediaType _typeFromJson(Object? raw) {
   final typeIdx = raw is int ? raw : 0;

@@ -76,7 +76,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
     // MARK: - Security constants
 
     /// Plugin-level cap for raw Data payloads delivered by share extensions (FSI-92).
-    /// Mirrors the Android plugin cap (16 MiB). Prevents a malicious source app from
+    /// Mirrors the Android plugin cap (16 MiB). Prevents an untrusted source app from
     /// exhausting the App Group container storage via an unbounded Data blob.
     private static let kMaxRawDataBytes = 16 * 1024 * 1024
 
@@ -302,7 +302,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
         }
         else if let raw = data as? Data {
             // SECURITY (FSI-92): Reject oversized raw Data payloads to prevent
-            // App Group container storage exhaustion by a malicious source app.
+            // App Group container storage exhaustion by an untrusted source app.
             guard raw.count <= Self.kMaxRawDataBytes else {
                 self.log("oversize Data payload rejected (\(raw.count) bytes > \(Self.kMaxRawDataBytes) limit)")
                 return
@@ -392,7 +392,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     func getFileName(from url: URL, type: SharingFileType) -> String {
-        // SECURITY (FSI-93): url.lastPathComponent is attacker-controlled.
+        // SECURITY (FSI-93): url.lastPathComponent is sender-controlled.
         // Sanitize before using as a destination filename in the App Group container.
         let raw = url.lastPathComponent
         if raw.isEmpty {

@@ -350,7 +350,7 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
     ///    `..`, so rejecting them costs nothing.
     /// 3. Both paths are standardised (`standardizedFileURL`: `.` segments,
     ///    repeated and trailing slashes removed) and compared by path
-    ///    component, so a sibling such as `<container>-evil/x` does not match.
+    ///    component, so a sibling such as `<container>-sibling/x` does not match.
     ///    The candidate must have more components than the container: the
     ///    container itself is never accepted.
     ///

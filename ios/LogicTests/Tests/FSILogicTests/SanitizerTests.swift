@@ -107,7 +107,7 @@ final class SanitizerTests: XCTestCase {
 
     func testNulIsStripped() {
         XCTAssertEqual(s.sanitize("a\u{0}b.txt"), "ab.txt")
-        XCTAssertFalse(s.sanitize("\u{0}evil\u{0}").unicodeScalars.contains("\u{0}"))
+        XCTAssertFalse(s.sanitize("\u{0}name\u{0}").unicodeScalars.contains("\u{0}"))
     }
 
     func testC0ControlsAreStripped() {
@@ -137,7 +137,7 @@ final class SanitizerTests: XCTestCase {
     // MARK: separators and dot names (FSI-93 regression)
 
     func testSlashesAreStripped() {
-        XCTAssertEqual(s.sanitize("../../etc/passwd"), "....etcpasswd")
+        XCTAssertEqual(s.sanitize("../../a/b"), "....ab")
     }
 
     func testDotNamesBecomeUnnamedEvenAfterStripping() {
