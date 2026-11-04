@@ -113,8 +113,8 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Severity:** High
 **Affected file:** `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` lines 138–143 (pre-fix)
 **STRIDE category:** Tampering + Denial of Service
-**Reproduction sketch:** A malicious source app advertises a `content://` URI whose backing provider streams an unbounded byte sequence. `getDataColumn` opened this stream and called `InputStream.copyTo(FileOutputStream)` with no size limit, writing the full provider output into `context.cacheDir`. An attacker can exhaust cacheDir storage, causing `FileOutputStream` failures that crash subsequent operations or fill the device partition.
-**Impact:** Host app cacheDir storage exhaustion; denial-of-service for any feature relying on cache space; potential `OutOfMemoryError` for very large streams buffered in memory.
+**Description:** The size of a streamed file was not bounded by the plugin.
+**Impact:** Cache storage exhaustion and denial of service.
 **Fix summary:** Introduced `MAX_STREAM_BYTES = 16 MiB` constant on `MyFileDirectory`. Replaced `copyTo` with a manual read loop that accumulates `totalWritten`; if the cap is exceeded the partial cache file is deleted and an `IOException` is thrown with a clear plugin-attributed message. `IOException` import added.
 **Residual risk:** 16 MiB is a hard plugin ceiling, not a default: a host app cannot raise it at runtime, and changing it means editing `MAX_STREAM_BYTES`. A host app can enforce a lower limit of its own, but not a higher one. The cap applies per file, and one oversized file aborts the whole share: the `IOException` leaves `getSharingUris`, the executor's `catch (Throwable)` logs it, and no item of that share reaches Dart.
 
@@ -123,8 +123,8 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Severity:** High
 **Affected file:** `android/src/main/kotlin/com/techind/flutter_sharing_intent/MyFileDirectory.kt` lines 117–119 (pre-fix)
 **STRIDE category:** Tampering
-**Reproduction sketch:** A malicious ContentProvider returns a `_display_name` value such as `../../malicious` or `/etc/passwd`. The raw value was fed directly to `File(context.cacheDir, fileName)`. On Android, `java.io.File` does not resolve the path against the base — it concatenates the string, so a name containing `/` would produce a path outside `cacheDir`, and `..` sequences could escape the intended subdirectory.
-**Impact:** An attacker-controlled source app could cause the plugin to write received file content to an attacker-chosen path within the app's sandbox, potentially overwriting existing cache files or data files accessible to the app.
+**Description:** A provider-supplied display name could influence the cache path.
+**Impact:** Files could be written outside the intended cache location.
 **Fix summary:** Added `sanitizeDisplayName(raw: String?): String` helper (marked `internal` for testability). The helper: (1) strips any path-prefix component before the last `/` or `\`; (2) rejects `.` and `..` as "unnamed"; (3) strips C0 control characters and NUL; (4) caps the result at 255 UTF-8 bytes; (5) falls back to "unnamed" for null/blank/empty inputs. `getDataColumn` now passes the raw cursor value through `sanitizeDisplayName` before constructing the `File` object.
 **Update (2026-10-13, FSI-98):** the original step (4) decoded the first 255 bytes with `String(bytes, 0, 255, UTF_8)`, which can split a multi-byte character; the decoder then inserts U+FFFD, and the result can exceed 255 bytes (for example 256 or 257). Step (4) now steps back over UTF-8 continuation bytes and cuts on a code point boundary, so the result is at most 255 bytes and contains no U+FFFD.
 **Residual risk:** Unicode homoglyphs in filenames are not normalized — this is acceptable as they do not affect filesystem path resolution on Android. The cut is on a code point boundary, not a grapheme-cluster boundary, so it can separate a combining mark or an emoji sequence from the rest of its character; the name stays valid and within the limit.
@@ -134,8 +134,8 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Severity:** High
 **Affected file:** `ios/Classes/FSIShareViewController.swift` lines 284–291 (pre-fix)
 **STRIDE category:** Denial of Service
-**Reproduction sketch:** A source app provides a share extension attachment whose `NSItemProvider` loads as a raw `Data` object. `handleFileItem` accepted the `Data` and called `raw.write(to: dst)` with no size check, writing an arbitrarily large blob into the App Group container. A malicious source can fill the shared container, causing subsequent writes by the main app to fail.
-**Impact:** App Group container storage exhaustion; denial of service for the Relocat share-intake pipeline and any other app sharing the same group container.
+**Description:** The size of a raw data payload was not bounded before it was written.
+**Impact:** App Group container storage exhaustion.
 **Fix summary:** Added `private static let kMaxRawDataBytes = 16 * 1024 * 1024` constant (16 MiB) to `FSIShareViewController`. In the `Data` branch of `handleFileItem`, added a `guard raw.count <= Self.kMaxRawDataBytes` check that returns early and logs a `print` diagnostic (consistent with the fork's existing `print`-based logging style) if the payload exceeds the cap.
 **Residual risk:** The `Data` object is loaded into memory before the size check. For very large payloads the memory allocation itself could be a concern, but `NSItemProvider.loadItem` applies its own limits in practice; this guard prevents the disk write.
 
@@ -144,8 +144,8 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Severity:** High
 **Affected file:** `ios/Classes/FSIShareViewController.swift` lines 368–372 (pre-fix), specifically `getFileName(from:type:)` and all callers that pass the result to `containerURL()?.appendingPathComponent(...)`.
 **STRIDE category:** Tampering
-**Reproduction sketch:** A source app provides a share attachment whose `URL.lastPathComponent` is `"../../escape"` or a URL-encoded path containing `/`. `getFileName` returned this value verbatim. When passed to `containerURL()?.appendingPathComponent(filename)`, Swift's `URL.appendingPathComponent` does NOT resolve `..` components — it appends them literally, producing a path outside the App Group container directory.
-**Impact:** An attacker-controlled source app could cause shared file copies to land outside the intended App Group container directory, potentially overwriting other files accessible to the extension or the main app.
+**Description:** A URL-derived file name could influence the destination path.
+**Impact:** Files could be written outside the intended container directory.
 **Fix summary:** Added `private func sanitizedComponent(_ raw: String) -> String` helper that: (1) returns "unnamed" for `.` and `..`; (2) strips `/` characters using `filter`; (3) caps at 255 UTF-8 bytes with proper Unicode scalar boundary truncation; (4) returns "unnamed" for blank/empty results. `getFileName(from:type:)` now passes `url.lastPathComponent` through `sanitizedComponent` before returning. All three call sites (`handleImageItem`, `handleVideoItem`, `handleFileItem`) inherit the fix via `getFileName`.
 **Update (2026-10-13, FSI-97):** the helper now also strips NUL and the other C0 (U+0000–U+001F), DEL (U+007F) and C1 (U+0080–U+009F) control characters, truncates on a Character (grapheme-cluster) boundary instead of a Unicode scalar boundary, and checks for `.`, `..` and blank names after stripping. The earlier comment claimed NUL could not occur in a Swift `String`; that was wrong.
 **Residual risk:** The thumbnail path in `getThumbnailPath(for:)` uses `Data(url.lastPathComponent.utf8).base64EncodedString()` — base64 encoding the raw component makes it safe already; no fix needed there.
@@ -155,8 +155,8 @@ Scope excludes `example/` and `build/`. Line numbers captured at commit
 **Severity:** Medium
 **Affected file:** `lib/model/sharing_file.dart` line 37 (pre-fix)
 **STRIDE category:** Denial of Service
-**Reproduction sketch:** The EventChannel or MethodChannel payload is a JSON blob whose `type` field is an integer outside the range `[0, SharedMediaType.values.length - 1]` (e.g., `7` when the enum has 7 values). `SharedMediaType.values[json['type']]` throws a `RangeError` at the point of `SharedFile.fromJson`. On the EventChannel path this runs in a `StreamTransformer`, so the exception becomes an error event on the share stream (an uncaught error if the app has no `onError` handler); on the `getInitialSharing` path the returned `Future` fails. Either way, that share is lost. The isolate keeps running.
-**Impact:** Loss of a share when processing an attacker-supplied intent payload; denial of service for the affected share.
+**Description:** An out-of-range media-type value in the payload could make decoding fail.
+**Impact:** Loss of the affected share.
 **Fix summary:** Replaced direct indexing with a top-level `_typeFromJson(Object? raw)` helper. The helper checks `raw is int`, bounds-checks the index against `SharedMediaType.values.length`, and returns `SharedMediaType.FILE` as a conservative fallback for out-of-range integers. A non-integer, null or missing `type` falls back to index 0 (`SharedMediaType.TEXT`). Added `test/sharing_file_test.dart` covering valid indices, out-of-range positive and negative indices, non-integer type, null, and missing key.
 **Residual risk:** The original fix hardened only `type`; the other fields of `SharedFile.fromJson` still threw a `TypeError` on a wrongly typed value (for example a non-int `duration` or a non-String `value`). This was fixed on 2026-10-13 (FSI-99, see the addendum): every field is now type-checked and a wrongly typed field is treated as absent. A payload that is not a JSON list of objects still makes decoding throw; the error reaches the app as described above.
 
@@ -316,22 +316,18 @@ An internal review before publication found the following. All four are fixed in
 
 | Finding ID | Severity | Title | Status | Fix commit |
 |---|---|---|---|---|
-| FSI-96 | Medium | iOS: `cleanup` container check was a string prefix (`<container>/../x` and `<container>-evil/x` accepted) | Fixed | `7c09732` |
+| FSI-96 | Medium | iOS: `cleanup` container check was a string prefix, weaker than documented | Fixed | `7c09732` |
 | FSI-97 | Low | iOS: `sanitizedComponent` kept NUL and other control characters, and could cut inside a Character | Fixed | `7c09732` |
 | FSI-98 | Low | Android: `sanitizeDisplayName` truncation could split a character, insert U+FFFD and exceed 255 bytes | Fixed | `7c09732` |
 | FSI-99 | Low | Dart: `SharedFile.fromJson` threw on wrongly typed fields other than `type` | Fixed | `7c09732` |
 
-**FSI-96.** `cleanupFiles` accepted any path for which `path.hasPrefix(containerPath)` was true, so
-`<container>/../<anything>` (which `removeItem` resolves) and sibling directories sharing the prefix
-passed, although the comment described a strict container guard. The caller is the host app's own
-Dart code, so the practical risk was low. The new `isStrictlyInsideContainer` fails closed: it rejects
-empty and relative paths and any path with a `..` component, standardises both paths
-(`standardizedFileURL`) and requires the candidate's path components to start with the container's
-components and to be longer, so the container itself is also refused. `..` is rejected rather than
-resolved because the kernel resolves `..` after following symlinks, so a lexical clean-up could name a
-different file from the one `removeItem` deletes. Symlinks are not resolved: `removeItem` deletes a
-symlink itself rather than its target, and only the host app and its share extension can create
-entries in the container.
+**FSI-96.** `cleanupFiles` checked the container with a string prefix, which was weaker than its comment
+described. The caller is the host app's own Dart code, so the practical risk was low. The new
+`isStrictlyInsideContainer` fails closed: it rejects empty and relative paths and any path with a `..`
+component, standardises both paths (`standardizedFileURL`) and requires the candidate's path components to
+start with the container's components and to be longer, so the container itself is also refused. `..` is
+rejected rather than resolved because the kernel resolves it after following symlinks, so a lexical
+clean-up could name a different file from the one `removeItem` deletes.
 
 **FSI-97.** The comment claimed NUL cannot occur in a Swift `String`; it can. `sanitizedComponent` now
 strips NUL, C0, DEL and C1 control characters, truncates by whole Characters within 255 UTF-8 bytes
@@ -431,7 +427,7 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
 - **API level.** The plugin no longer uses `java.nio.file` or `File.toPath`. Links and entry types are
   read with `android.system.Os.lstat` (API 21), and deletes are a manual recursion that never
   descends into a link. A source check fails if those calls return. The JVM tests use a stand-in for
-  `Os.lstat`; Android lint (`NewApi`) is run on the plugin as a second check.
+  `Os.lstat`; Android lint (`NewApi`) was run on the plugin for this change (0 findings).
 - **Partial deletes.** `deleteShareCopies` and the recursive delete keep going after a failure; the
   first error is rethrown at the end with the others suppressed, and an undeletable child is not
   masked by a "directory not empty" error from its parent.
@@ -454,5 +450,12 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
   - File URLs are converted to paths with `URL`, so names with spaces or non-ASCII characters
     resolve.
   - A failed thumbnail write leaves no file.
+- **Follow-ups.**
+  - A thumbnail is recorded for cleanup the moment it exists, so a later failure still deletes it.
+  - A thumbnail counts as written only after the output stream closed successfully.
+  - A failing cleanup never replaces the original error; it is attached as suppressed.
+  - Independent delete failures in different subtrees are all recorded.
+  - `cleanup` always replies and returns the number of files removed, on both platforms.
+  - The descriptions of FSI-90..94 no longer include reproduction steps.
 - **Example app.** `example/ios/Share Extension/FSIShareViewController.swift` is now a copy of the
   hardened `ios/Classes/FSIShareViewController.swift`, and the README setup step points there.

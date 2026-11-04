@@ -97,16 +97,50 @@ object MyFileDirectory {
      */
     fun getAbsolutePaths(context: Context, uris: List<Uri>): List<String> {
         val copies = mutableListOf<String>()
-        var isComplete = false
-        try {
+        return withCleanup(cleanup = { deleteShareCopies(copies) }) {
             for (uri in uris) {
                 getAbsolutePath(context, uri)?.let { copies.add(it) }
             }
-            isComplete = true
-        } finally {
-            if (!isComplete) deleteShareCopies(copies)
+            copies
         }
-        return copies
+    }
+
+    /**
+     * Runs [body]; if it throws, runs [cleanup] and rethrows the ORIGINAL
+     * failure, with any failure of the cleanup attached as suppressed so it
+     * can never replace the original (FSI-106). Catching Throwable is
+     * deliberate and safe here: the exception is always rethrown.
+     */
+    internal inline fun <T> withCleanup(cleanup: () -> Unit, body: () -> T): T {
+        try {
+            return body()
+        } catch (original: Throwable) {
+            try {
+                cleanup()
+            } catch (cleanupFailure: Throwable) {
+                original.addSuppressed(cleanupFailure)
+            }
+            throw original
+        }
+    }
+
+    /** Thumbnail and duration of one media file; either may be null. */
+    class MediaDetails(val thumbnail: String?, val duration: Long?)
+
+    /**
+     * Extracts the thumbnail and then the duration. A malformed file yields
+     * nulls (see [orNullOnMediaFailure]). The thumbnail path is appended to
+     * [createdThumbnails] AS SOON AS it exists, so even if the duration step
+     * dies with an Error the caller can still delete the thumbnail (FSI-106).
+     */
+    fun extractMediaDetails(
+        createdThumbnails: MutableList<String>,
+        thumbnail: () -> String?,
+        duration: () -> Long?,
+    ): MediaDetails {
+        val thumbnailPath = orNullOnMediaFailure(thumbnail)
+        if (thumbnailPath != null) createdThumbnails.add(thumbnailPath)
+        return MediaDetails(thumbnailPath, orNullOnMediaFailure(duration))
     }
 
     /**
@@ -185,12 +219,11 @@ object MyFileDirectory {
         }
 
         val targetFile = newShareTargetFile(context.cacheDir, fileName)
-        var copiedPath: String? = null
-        try {
-            copiedPath = copyStream(context, uri, targetFile)
-        } finally {
-            if (copiedPath == null) targetFile.parentFile?.let { deleteWithoutFollowingLinks(it) }
+        val shareDirectory = targetFile.parentFile
+        val copiedPath = withCleanup(cleanup = { shareDirectory?.let { deleteWithoutFollowingLinks(it) } }) {
+            copyStream(context, uri, targetFile)
         }
+        if (copiedPath == null) shareDirectory?.let { deleteWithoutFollowingLinks(it) }
         return copiedPath
     }
 
@@ -331,25 +364,37 @@ object MyFileDirectory {
         throw first
     }
 
-    private fun deleteEntry(entry: File, failures: MutableList<IOException>) {
+    /**
+     * Deletes [entry] and returns true if the whole subtree is gone. Each
+     * failing entry records one error; a directory whose subtree failed adds
+     * none of its own, so an error is never masked by "directory not empty"
+     * and independent failures in different subtrees are all recorded.
+     */
+    private fun deleteEntry(entry: File, failures: MutableList<IOException>): Boolean {
         val type = try {
             entryType(entry)
         } catch (e: IOException) {
             failures.add(e)
-            return
+            return false
         }
-        if (type == EntryType.MISSING) return
+        if (type == EntryType.MISSING) return true
         if (type == EntryType.DIRECTORY) {
             val children = entry.list()
             if (children == null) {
                 failures.add(IOException("flutter_sharing_intent: cannot list cache directory"))
-                return
+                return false
             }
-            children.forEach { deleteEntry(File(entry, it), failures) }
+            var isSubtreeClean = true
+            for (child in children) {
+                if (!deleteEntry(File(entry, child), failures)) isSubtreeClean = false
+            }
+            if (!isSubtreeClean) return false
         }
-        if (!entry.delete() && failures.isEmpty()) {
+        if (!entry.delete()) {
             failures.add(IOException("flutter_sharing_intent: cannot delete cache entry"))
+            return false
         }
+        return true
     }
 
     /**
@@ -358,11 +403,18 @@ object MyFileDirectory {
      * exception from [compress] deletes the file and yields null (or
      * rethrows), so a failed write never leaves a partial thumbnail.
      */
-    internal fun writeThumbnail(cacheDir: File, compress: (java.io.OutputStream) -> Boolean): String? {
+    internal fun writeThumbnail(
+        cacheDir: File,
+        openOutput: (File) -> java.io.OutputStream = { FileOutputStream(it) },
+        compress: (java.io.OutputStream) -> Boolean,
+    ): String? {
         val target = newThumbnailFile(cacheDir)
         var isWritten = false
         try {
-            FileOutputStream(target).use { out -> isWritten = compress(out) }
+            // The result is taken only after close() returned, so a failing
+            // close cannot leave a partial PNG that counts as written.
+            val compressed = openOutput(target).use { out -> compress(out) }
+            isWritten = compressed
         } finally {
             if (!isWritten) target.delete()
         }

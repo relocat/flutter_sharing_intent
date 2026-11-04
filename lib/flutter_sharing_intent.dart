@@ -46,7 +46,9 @@ class FlutterSharingIntent {
   /// Extension copies shared files into the App Group container, and
   /// without cleanup those plaintext copies persist on disk until the
   /// host app or OS removes them.
-  Future<void> cleanup(List<String> paths) =>
+  ///
+  /// Returns how many files were deleted.
+  Future<int> cleanup(List<String> paths) =>
       FlutterSharingIntentPlatform.instance.cleanup(paths);
 
   /// Sets up a broadcast stream for receiving incoming media share change events.

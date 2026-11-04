@@ -109,8 +109,19 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
           return
         }
         backgroundExecutor.execute {
-          MyFileDirectory.removeOwnedFiles(applicationContext.cacheDir, paths)
-          mainHandler.post { result.success(null) }
+          var removed = 0
+          var isDone = false
+          try {
+            removed = MyFileDirectory.removeOwnedFiles(applicationContext.cacheDir, paths)
+            isDone = true
+          } catch (e: SecurityException) {
+            Log.w(TAG, "cleanup failed: ${e.javaClass.simpleName}")
+          } finally {
+            // A reply is ALWAYS posted, so the Dart future never hangs.
+            mainHandler.post {
+              if (isDone) result.success(removed) else result.error("CLEANUP_FAILED", "cleanup failed", null)
+            }
+          }
         }
       }
       else -> result.notImplemented()
@@ -211,32 +222,33 @@ class FlutterSharingIntentPlugin: FlutterPlugin, ActivityAware, MethodCallHandle
     // for this intent is deleted before the payload is dropped (FSI-104).
     val paths = MyFileDirectory.getAbsolutePaths(applicationContext, uris)
     val thumbnails = mutableListOf<String>()
-    var isBuilt = false
-    try {
+    return MyFileDirectory.withCleanup(cleanup = {
+      MyFileDirectory.removeOwnedFiles(applicationContext.cacheDir, thumbnails)
+      MyFileDirectory.deleteShareCopies(paths)
+    }) {
       val items = JSONArray()
-      for (path in paths) {
-        val item = buildFileItem(path)
-        if (item.has("thumbnail")) thumbnails.add(item.getString("thumbnail"))
-        items.put(item)
-      }
-      isBuilt = true
-      return if (intent.action == Intent.ACTION_SEND && items.length() == 0) null else items
-    } finally {
-      if (!isBuilt) {
-        MyFileDirectory.removeOwnedFiles(applicationContext.cacheDir, thumbnails)
-        MyFileDirectory.deleteShareCopies(paths)
-      }
+      for (path in paths) items.put(buildFileItem(path, thumbnails))
+      if (intent.action == Intent.ACTION_SEND && items.length() == 0) null else items
     }
   }
 
-  /** Builds the payload entry for one copied file. A bad thumbnail or duration never drops it. */
-  private fun buildFileItem(path: String): JSONObject {
+  /**
+   * Builds the payload entry for one copied file. A bad thumbnail or duration
+   * never drops it, and every thumbnail is recorded in [createdThumbnails] the
+   * moment it exists.
+   */
+  private fun buildFileItem(path: String, createdThumbnails: MutableList<String>): JSONObject {
     val type = getMediaType(path)
+    val details = MyFileDirectory.extractMediaDetails(
+      createdThumbnails,
+      thumbnail = { getThumbnail(path, type) },
+      duration = { getDuration(path, type) },
+    )
     return JSONObject()
       .put("value", path)
       .put("type", type.ordinal)
-      .put("thumbnail", MyFileDirectory.orNullOnMediaFailure { getThumbnail(path, type) })
-      .put("duration", MyFileDirectory.orNullOnMediaFailure { getDuration(path, type) })
+      .put("thumbnail", details.thumbnail)
+      .put("duration", details.duration)
   }
 
  private fun getSharingText(intent: Intent?): JSONArray? {

@@ -23,7 +23,7 @@ class MockFlutterSharingIntentPlatform
   void reset() {}
 
   @override
-  Future<void> cleanup(List<String> paths) async {}
+  Future<int> cleanup(List<String> paths) async => 0;
 }
 
 void main() {

@@ -24,4 +24,26 @@ void main() {
   test('getPlatformVersion', () async {
     expect(await platform.getPlatformVersion(), '42');
   });
+
+  group('cleanup', () {
+    test('passes the paths and returns the removed count', () async {
+      MethodCall? received;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+        received = call;
+        return 2;
+      });
+      expect(await platform.cleanup(['/a/b/c', '/a/b/d']), 2);
+      expect(received?.method, 'cleanup');
+      expect(received?.arguments, {
+        'paths': ['/a/b/c', '/a/b/d'],
+      });
+    });
+
+    test('treats a missing reply as zero removed files', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async => null);
+      expect(await platform.cleanup(['/a/b/c']), 0);
+    });
+  });
 }

@@ -13,6 +13,7 @@ import java.io.IOException
 import java.nio.file.Files
 
 private var failures = 0
+private var skipped = 0
 private val uuidPattern = Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 private const val MILLIS_PER_DAY = 24L * 60L * 60L * 1000L
 private const val SOURCE_OVER_CAP_BYTES = 16 * 1024 * 1024 + 1
@@ -305,7 +306,8 @@ private fun testDeleteContinuesAfterAFailure() {
     val firstDirectory = File(firstPath).parentFile
     if (!canBlockDeletes(firstDirectory)) {
         firstDirectory.setWritable(true, false)
-        println("SKIP F-3 (this account can delete from read-only directories)")
+        skipped++
+        println("SKIPPED (root) F-3: this account can delete from read-only directories")
         return
     }
     val thrown = try { MyFileDirectory.deleteShareCopies(listOf(firstPath, secondPath)); null } catch (e: IOException) { e }
@@ -323,6 +325,24 @@ private fun testDeleteContinuesAfterAFailure() {
     blocked.setWritable(true, false)
     check("F-3 recursive delete continued past the failure", !File(tree, "other.txt").exists())
     check("F-3 recursive delete reports the real error, not the parent's", treeFailure?.message?.contains("cannot delete cache entry") == true && treeFailure.suppressed.isEmpty(), "${treeFailure?.message} suppressed=${treeFailure?.suppressed?.size}")
+
+    // L-4: independent failures in different subtrees are ALL recorded.
+    val twoTrees = File(context.cacheDir, "two").apply { mkdirs() }
+    val blockedA = File(twoTrees, "a").apply { mkdirs(); File(this, "f").writeText("x") }
+    val blockedB = File(twoTrees, "b").apply { mkdirs(); File(this, "f").writeText("x") }
+    canBlockDeletes(blockedA)
+    canBlockDeletes(blockedB)
+    val both = try { MyFileDirectory.deleteWithoutFollowingLinks(twoTrees); null } catch (e: IOException) { e }
+    blockedA.setWritable(true, false)
+    blockedB.setWritable(true, false)
+    check("L-4 two failing subtrees give one error plus one suppressed", both != null && both.suppressed.size == 1, "suppressed=${both?.suppressed?.size}")
+
+    // L-3: a failing cleanup never replaces the original failure.
+    val result = try {
+        MyFileDirectory.withCleanup(cleanup = { throw IOException("cleanup failed") }) { throw IOException("original") }
+    } catch (e: IOException) { e }
+    check("L-3 the original failure is rethrown", (result as IOException).message == "original")
+    check("L-3 the cleanup failure is attached as suppressed", result.suppressed.size == 1 && result.suppressed[0].message == "cleanup failed")
 }
 
 // F-4: thumbnails.
@@ -384,6 +404,52 @@ private fun testCleanupRemovesOnlyOwnedFiles() {
     Files.createSymbolicLink(File(linked.cacheDir, MyFileDirectory.SHARE_CACHE_DIR_NAME).toPath(), target.toPath())
     val viaLink = MyFileDirectory.removeOwnedFiles(linked.cacheDir, listOf(File(linked.cacheDir, "${MyFileDirectory.SHARE_CACHE_DIR_NAME}/${victimDirectory.name}/a.txt").path))
     check("A-2 a path through a symlinked root is refused", viaLink == 0 && victim.exists())
+}
+
+// L-2: a close() that fails must not leave a partial thumbnail that counts as written.
+private fun testThumbnailCloseFailure() {
+    val context = freshContext()
+    val closeFails = { file: File ->
+        object : java.io.FilterOutputStream(java.io.FileOutputStream(file)) {
+            override fun write(b: ByteArray, off: Int, len: Int) { out.write(b, off, len) }
+            override fun close() { out.close(); throw IOException("close failed") }
+        }
+    }
+    val threw = try { MyFileDirectory.writeThumbnail(context.cacheDir, closeFails) { out -> out.write(1); true }; false } catch (e: IOException) { true }
+    val thumbnailRoot = File(context.cacheDir, MyFileDirectory.THUMBNAIL_CACHE_DIR_NAME)
+    check("L-2 a failing close propagates", threw)
+    check("L-2 a failing close leaves no thumbnail", entriesOf(thumbnailRoot).isEmpty(), "${entriesOf(thumbnailRoot)}")
+}
+
+// L-1: the thumbnail is recorded as soon as it exists, even if the next step dies with an Error.
+private fun testThumbnailIsRecordedBeforeTheDurationStep() {
+    val context = freshContext()
+    val created = mutableListOf<String>()
+    val died = try {
+        MyFileDirectory.extractMediaDetails(
+            created,
+            thumbnail = { MyFileDirectory.writeThumbnail(context.cacheDir) { out -> out.write(1); true } },
+            duration = { throw OutOfMemoryError() },
+        )
+        false
+    } catch (e: OutOfMemoryError) { true }
+    check("L-1 the Error propagates", died)
+    check("L-1 the thumbnail was already recorded", created.size == 1 && File(created[0]).exists())
+    check("L-1 the recorded thumbnail can be deleted", MyFileDirectory.removeOwnedFiles(context.cacheDir, created) == 1 && !File(created[0]).exists())
+    val details = MyFileDirectory.extractMediaDetails(mutableListOf(), thumbnail = { throw IllegalStateException("bad") }, duration = { 5L })
+    check("L-1 a failing thumbnail still yields the duration", details.thumbnail == null && details.duration == 5L)
+}
+
+// L-8: a symlinked per-share directory is refused by cleanup.
+private fun testCleanupRefusesSymlinkedShareDirectory() {
+    val context = freshContext()
+    val outside = Files.createTempDirectory("fsi-outside").toFile().canonicalFile
+    val victim = File(outside, "a.txt").apply { writeText("x") }
+    val root = File(context.cacheDir, MyFileDirectory.SHARE_CACHE_DIR_NAME).apply { mkdirs() }
+    val linkName = java.util.UUID.randomUUID().toString()
+    Files.createSymbolicLink(File(root, linkName).toPath(), outside.toPath())
+    val removed = MyFileDirectory.removeOwnedFiles(context.cacheDir, listOf(File(root, "$linkName/a.txt").path))
+    check("L-8 a symlinked per-share directory is refused", removed == 0 && victim.exists())
 }
 
 // F-1: the plugin must not use java.nio.file (API 26) or File.toPath().
@@ -533,8 +599,15 @@ fun main(args: Array<String>) {
     guarded("F-3") { testDeleteContinuesAfterAFailure() }
     guarded("F-4") { testThumbnailWriting() }
     guarded("A-2") { testCleanupRemovesOnlyOwnedFiles() }
+    guarded("L-2") { testThumbnailCloseFailure() }
+    guarded("L-1") { testThumbnailIsRecordedBeforeTheDurationStep() }
+    guarded("L-8") { testCleanupRefusesSymlinkedShareDirectory() }
     guarded("F-1") { testNoApi26Calls(scan) }
     guarded("F-2") { testLogAllowlist(scan) }
-    println(if (failures == 0) "ALL PASS" else "FAILURES: $failures")
+    println(when {
+        failures > 0 -> "FAILURES: $failures"
+        skipped > 0 -> "ALL PASS WITH SKIPS (root): $skipped"
+        else -> "ALL PASS"
+    })
     System.exit(failures)
 }

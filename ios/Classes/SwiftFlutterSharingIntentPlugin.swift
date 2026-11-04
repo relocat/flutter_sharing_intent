@@ -160,8 +160,7 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                     message: "cleanup requires paths: [String]", details: nil))
                 return
             }
-            cleanupFiles(paths: paths)
-            result(nil)
+            result(cleanupFiles(paths: paths))
 
         default:
             result(FlutterMethodNotImplemented);
@@ -208,12 +207,12 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
     /// (FSI-31). Best-effort: per-file errors are logged and swallowed; the
     /// method never throws back to Dart. The work is done by
     /// `removeOwnedFiles`, which is the unit the logic tests exercise.
-    private func cleanupFiles(paths: [String]) {
+    private func cleanupFiles(paths: [String]) -> Int {
         guard let groupUrl = self.appGroupContainerURL() else {
             NSLog("[FSI] cleanup: no App Group container URL available")
-            return
+            return 0
         }
-        Self.removeOwnedFiles(paths: paths, containerURL: groupUrl)
+        return Self.removeOwnedFiles(paths: paths, containerURL: groupUrl)
     }
 
     /// Directory below the App Group container that holds one sub-directory
@@ -355,11 +354,10 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
     ///    The candidate must have more components than the container: the
     ///    container itself is never accepted.
     ///
-    /// Symlinks are not resolved, matching the rest of the plugin, which works
-    /// on the paths it wrote. `removeItem` deletes a symlink itself, not its
-    /// target, so a symlink as the last component cannot redirect a delete. A
-    /// symlinked directory inside the container could; only the host app and
-    /// its own share extension can write there.
+    /// Symlinks are not resolved by this lexical check. `removeOwnedFiles`
+    /// covers them separately: `hasRealOwnedDirectories` refuses a symlinked
+    /// plugin directory and `isRegularFile` refuses a symlink as the last
+    /// component, so a link can never redirect a delete.
     static func isStrictlyInsideContainer(path: String, containerURL: URL) -> Bool {
         guard !path.isEmpty, path.hasPrefix("/") else { return false }
         let rawComponents = path.split(separator: "/", omittingEmptySubsequences: true)

@@ -45,7 +45,9 @@ abstract class FlutterSharingIntentPlatform extends PlatformInterface {
   /// plugin directories of the App Group container are deleted; on Android
   /// only the plugin's own copies and thumbnails in the cache directory are.
   /// Every other path is ignored.
-  Future<void> cleanup(List<String> paths) {
+  ///
+  /// Returns how many files were deleted.
+  Future<int> cleanup(List<String> paths) {
     throw UnimplementedError('cleanup() has not been implemented.');
   }
 }

@@ -37,7 +37,9 @@ class MethodChannelFlutterSharingIntent extends FlutterSharingIntentPlatform {
   }
 
   @override
-  Future<void> cleanup(List<String> paths) async {
-    await methodChannel.invokeMethod<void>('cleanup', {'paths': paths});
+  Future<int> cleanup(List<String> paths) async {
+    final removed =
+        await methodChannel.invokeMethod<int>('cleanup', {'paths': paths});
+    return removed ?? 0;
   }
 }
