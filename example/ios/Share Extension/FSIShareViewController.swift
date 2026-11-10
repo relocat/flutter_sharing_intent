@@ -131,7 +131,11 @@ open class FSIShareViewController: SLComposeServiceViewController {
         // The base class does not clean up: mark the share aborted FIRST, so
         // loads still in flight stage nothing, then remove what is staged.
         abortAndCleanup()
-        super.didSelectCancel()
+        // The base class completes the request itself, so claim the completion
+        // first: after an error alert the request may already be completed.
+        if claimCompletion() {
+            super.didSelectCancel()
+        }
     }
 
     open override func isContentValid() -> Bool {
@@ -140,13 +144,12 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     open override func didSelectPost() {
+        // Defense in depth beyond the UIKit gate in `isContentValid`: a Post
+        // before every load settled does nothing.
+        guard hasSettledLoads else { return }
         let isEmpty = stateQueue.sync(execute: { self.sharedMedia.isEmpty })
         if isEmpty {
-            if let text = self.contentText, !text.isEmpty {
-                let textFile = SharingFile(value: text, thumbnail: nil, duration: nil, type: .text)
-                self.saveAndRedirect(message: text, appending: textFile)
-                return
-            }
+            // Nothing was staged: no media means nothing to hand over.
             cleanupStagedFiles()
             self.completeAndExit()
         } else {
@@ -425,20 +428,19 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// The ONE place where delivery is decided, atomically on the state queue:
     /// a share that was aborted is dropped, a share that was already delivered
     /// is left alone, and otherwise the share is marked finished and its media
-    /// returned (with `textFile` appended for a text-only Post).
-    private func decideDelivery(appending textFile: SharingFile?) -> Delivery {
+    /// returned.
+    private func decideDelivery() -> Delivery {
         return stateQueue.sync { () -> Delivery in
             if isFinished { return .alreadyDelivered }
             isFinished = true
             guard !isAbortedNow else { return .drop }
-            if let textFile = textFile { sharedMedia.append(textFile) }
             return .deliver(sharedMedia)
         }
     }
 
-    private func saveAndRedirect(message: String? = nil, appending textFile: SharingFile? = nil) {
+    private func saveAndRedirect() {
         let media: [SharingFile]
-        switch decideDelivery(appending: textFile) {
+        switch decideDelivery() {
         case .alreadyDelivered:
             return
         case .drop:
@@ -468,7 +470,7 @@ open class FSIShareViewController: SLComposeServiceViewController {
             }
             ud.set(data, forKey: kUserDefaultsKey)
         }
-        ud.set(message, forKey: kUserDefaultsMessageKey)
+        ud.removeObject(forKey: kUserDefaultsMessageKey)
         ud.synchronize()
         redirectToHostApp(url)
     }
@@ -721,13 +723,19 @@ open class FSIShareViewController: SLComposeServiceViewController {
     /// Completes the extension request exactly once, whichever path gets here
     /// first (success, error alert, cancel).
     private func completeRequestOnce() {
-        flagLock.lock()
-        let isFirst = !completedFlag
-        completedFlag = true
-        flagLock.unlock()
-        if isFirst {
+        if claimCompletion() {
             extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
         }
+    }
+
+    /// Claims the right to complete the request. Returns true for the first
+    /// caller only.
+    private func claimCompletion() -> Bool {
+        flagLock.lock()
+        defer { flagLock.unlock() }
+        let isFirst = !completedFlag
+        completedFlag = true
+        return isFirst
     }
     
     /// Deletes everything this invocation staged. Used on cancel, error and

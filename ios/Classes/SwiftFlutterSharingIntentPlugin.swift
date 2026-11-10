@@ -66,6 +66,9 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
         // FSI-81: expose the live plugin instance to host SceneDelegate
         // forwarding methods. See UIScene bridging section above.
         sharedInstance = instance
+
+        // Bound how long leftovers of an interrupted share can live (FSI-107).
+        instance.sweepStaleSharedFilesInBackground()
     }
 
     /// Host-side forwarder for `UISceneDelegate.scene(_:openURLContexts:)`
@@ -273,6 +276,76 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                 #else
                 NSLog("[FSI] cleanup failed for a container file")
                 #endif
+            }
+        }
+        return removedCount
+    }
+
+    /// Age after which an unreferenced share directory or thumbnail is removed
+    /// by `sweepStaleFiles`. Far above any share's lifetime, because the share
+    /// extension may be running while the sweep runs.
+    static let kStaleFileMaxAgeSeconds: TimeInterval = 24 * 60 * 60
+
+    /// Reads the pending payload and sweeps stale plugin files off the main
+    /// thread. Files named in the pending payload are never swept.
+    private func sweepStaleSharedFilesInBackground() {
+        guard let container = appGroupContainerURL() else { return }
+        var identifiers: [String] = []
+        if let data = UserDefaults(suiteName: resolvedAppGroupId())?.data(forKey: kUserDefaultsKey),
+           let files = try? decode(data: data) {
+            for file in files {
+                identifiers.append(file.value)
+                if let thumbnail = file.thumbnail { identifiers.append(thumbnail) }
+            }
+        }
+        let referenced = Self.referencedPaths(fromIdentifiers: identifiers)
+        DispatchQueue.global(qos: .utility).async {
+            _ = Self.sweepStaleFiles(containerURL: container, referencedPaths: referenced,
+                                     now: Date(), maxAge: Self.kStaleFileMaxAgeSeconds)
+        }
+    }
+
+    /// The standardised filesystem paths named by stored file identifiers
+    /// (`file://` URLs or plain paths); identifiers that do not convert are skipped.
+    static func referencedPaths(fromIdentifiers identifiers: [String]) -> Set<String> {
+        var paths = Set<String>()
+        for identifier in identifiers {
+            if let path = filePath(fromFileIdentifier: identifier) {
+                paths.insert(URL(fileURLWithPath: path).standardizedFileURL.path)
+            }
+        }
+        return paths
+    }
+
+    /// Removes leftovers of interrupted shares and returns how many were
+    /// removed (FSI-107). Only two kinds of entry below the plugin roots are
+    /// candidates: a UUID-named directory under `flutter_sharing_intent` and a
+    /// `<UUID>.jpg` regular file under `flutter_sharing_intent_thumbnails`. An
+    /// entry is removed only if it is older than `maxAge` and neither it nor
+    /// anything inside it is in `referencedPaths`. A root must be a real
+    /// directory; a symbolic link (as a root or as an entry), any other name and
+    /// anything outside the two roots is never touched or followed.
+    @discardableResult
+    static func sweepStaleFiles(containerURL: URL, referencedPaths: Set<String>, now: Date, maxAge: TimeInterval) -> Int {
+        let fm = FileManager.default
+        let cutoff = now.addingTimeInterval(-maxAge)
+        let container = containerURL.standardizedFileURL
+        var removedCount = 0
+        for rootName in [kShareRootName, kThumbnailRootName] {
+            let isShareRoot = rootName == kShareRootName
+            let root = container.appendingPathComponent(rootName, isDirectory: true)
+            guard let rootAttributes = try? fm.attributesOfItem(atPath: root.path),
+                  (rootAttributes[.type] as? FileAttributeType) == .typeDirectory,
+                  let names = try? fm.contentsOfDirectory(atPath: root.path) else { continue }
+            for name in names {
+                guard isShareRoot ? UUID(uuidString: name) != nil : isThumbnailLeaf(name) else { continue }
+                let child = root.appendingPathComponent(name, isDirectory: isShareRoot)
+                guard let attributes = try? fm.attributesOfItem(atPath: child.path),
+                      (attributes[.type] as? FileAttributeType) == (isShareRoot ? .typeDirectory : .typeRegular),
+                      let modified = attributes[.modificationDate] as? Date, modified < cutoff else { continue }
+                let childPath = child.standardizedFileURL.path
+                if referencedPaths.contains(where: { $0 == childPath || $0.hasPrefix(childPath + "/") }) { continue }
+                if (try? fm.removeItem(at: child)) != nil { removedCount += 1 }
             }
         }
         return removedCount

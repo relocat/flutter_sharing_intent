@@ -468,8 +468,8 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
   copies are raised to complete protection before they are shared, and a file that cannot be raised is not
   shared. Both are unreadable while the device is locked.
 - The extension tracks everything it staged in one invocation (per-share directories and thumbnails) and
-  deletes it on cancel and on error. On success the files are kept, because the host app reads them and then
-  calls `cleanup`. This is in addition to the immediate removal of a directory whose write failed.
+  deletes it on cancel and on error, while the extension keeps running. On success the files are kept, because
+  the host app reads them and then calls `cleanup`. This is in addition to the immediate removal of a directory whose write failed.
 - The tracked lists and the delivery state are only accessed on one serial queue, and load handlers run on that
   queue. The abort flag sits behind a small lock, so Cancel never waits for a copy that is running; a handler
   that finishes after an abort removes what it staged, and Cancel waits for the cleanup only for a bounded time.
@@ -480,6 +480,15 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
 - Per-share directories and the thumbnail directory are created with complete file protection, so files
   created in them inherit it. Only regular files (not directories or symbolic links) are copied, and the copy
   is checked again after it was made, because `cleanup` removes regular files only.
+- The plugin sweeps leftovers of interrupted shares when it registers, off the main thread: a UUID-named share
+  directory or a `<UUID>.jpg` thumbnail under the two plugin directories is removed when it is older than 24 hours
+  and is not named in the pending payload. The sweep applies the same rules as `cleanup`: the plugin directories must
+  be real directories, symbolic links are never followed or removed, and any other name or place is never touched.
+  This bounds how long a leftover can live.
+- Residual: if the extension process is killed during a copy, the files of that share stay until the sweep removes
+  them, and a copy that was in progress may not yet have been raised to complete protection.
+- `didSelectCancel` claims the request completion before calling the base class, and `didSelectPost` ignores a
+  Post made before all loads settled.
 - A symbolic link in place of the plugin directory or the thumbnail directory is refused before staging, and so
   is any error other than "no such file" while checking it.
 - The redirect URL is computed before anything is written to the shared defaults; if it cannot be built the

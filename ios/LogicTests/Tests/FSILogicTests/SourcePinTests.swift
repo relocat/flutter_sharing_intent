@@ -12,6 +12,8 @@ final class SourcePinTests: XCTestCase {
     func testDirectoriesAreCreatedProtected() { XCTAssertTrue(SourcePins.directoriesAreCreatedProtected) }
     func testRootsAreCheckedBeforeStaging() { XCTAssertTrue(SourcePins.rootsAreCheckedBeforeStaging) }
     func testStagingRunsOnTheStateQueue() { XCTAssertTrue(SourcePins.stagingRunsOnTheStateQueue) }
+    func testCancelClaimsCompletionBeforeSuper() { XCTAssertTrue(SourcePins.cancelClaimsCompletionBeforeSuper) }
+    func testPostIgnoresUnsettledLoads() { XCTAssertTrue(SourcePins.postIgnoresUnsettledLoads) }
     func testCancelAbortsBeforeSuper() { XCTAssertTrue(SourcePins.cancelAbortsBeforeSuper) }
     func testErrorPathAborts() { XCTAssertTrue(SourcePins.errorPathAborts) }
     func testErrorUiRunsOnMain() { XCTAssertTrue(SourcePins.errorUiRunsOnMain) }

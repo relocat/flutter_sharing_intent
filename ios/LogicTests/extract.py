@@ -19,7 +19,10 @@ Source-pin controls (a mutated copy of the controller feeds the pin scan):
   noprotect, nocancel, noabortcheck, nowrap, noabortorder, nodirprotect, nonreg,
   softprotect, noroot, latedefaults, multiwrite, nouiqueue, unsafeaccess, noemptyclean,
   nofinish, nodrop, noskipfinished, noselfclean, noclearmedia, postalwaysvalid,
-  unlockedflag, syncabort, doublecomplete, nopostcheck, nodefaultsguard, noprecondition.
+  unlockedflag, syncabort, doublecomplete, nopostcheck, nodefaultsguard, noprecondition,
+  cancelnoclaim, postnoguard.
+Sweep controls (sweepStaleFiles): sweepall (no age check), sweepreferenced, sweepfollow
+  (no file-type check), sweepnonuuid, sweeprootlink (no real-root check).
 Helper controls: rootany (any error counts as a missing root), destok (the post-copy
   check accepts everything), followlinks (removeStagedItems follows links), rootok and copyok
   (the guards accept everything).
@@ -72,14 +75,26 @@ a, b, realdirs = block(plugin, "    static func hasRealOwnedDirectories(")
 report("hasRealOwnedDirectories", plugin, a, b, realdirs)
 a, b, filepath = block(plugin, "    static func filePath(fromFileIdentifier")
 report("filePath", plugin, a, b, filepath)
+a, b, sweep = block(plugin, "    static func sweepStaleFiles(")
+report("sweepStaleFiles", plugin, a, b, sweep)
+a, b, refpaths = block(plugin, "    static func referencedPaths(")
+report("referencedPaths", plugin, a, b, refpaths)
 a, b, remover = block(plugin, "    static func removeOwnedFiles(")
 report("removeOwnedFiles", plugin, a, b, remover)
-constants = "".join(line(plugin, prefix) + "\n" for prefix in ("    static let kShareRootName", "    static let kThumbnailRootName"))
+constants = "".join(line(plugin, prefix) + "\n" for prefix in ("    static let kShareRootName", "    static let kThumbnailRootName", "    static let kStaleFileMaxAgeSeconds"))
 
 # Wiring pin: the plugin's cleanupFiles must delegate to the extracted function.
 assert "Self.removeOwnedFiles(paths: paths, containerURL: groupUrl)" in open(os.path.join(root, plugin), encoding="utf-8").read(), \
     "cleanupFiles no longer calls removeOwnedFiles"
 
+sweep_mutations = {
+    "sweepall": ("let modified = attributes[.modificationDate] as? Date, modified < cutoff else { continue }",
+                 "let _ = attributes[.modificationDate] as? Date else { continue }"),
+    "sweepreferenced": ("if referencedPaths.contains(where: { $0 == childPath || $0.hasPrefix(childPath + \"/\") }) { continue }\n", ""),
+    "sweepfollow": ("(attributes[.type] as? FileAttributeType) == (isShareRoot ? .typeDirectory : .typeRegular),\n                      ", ""),
+    "sweepnonuuid": ("guard isShareRoot ? UUID(uuidString: name) != nil : isThumbnailLeaf(name) else { continue }", "guard true else { continue }"),
+    "sweeprootlink": ("(rootAttributes[.type] as? FileAttributeType) == .typeDirectory,\n                  let names", "true,\n                  let names"),
+}
 if variant == "control":
     regular = "    static func isRegularFile(atPath path: String) -> Bool {\n        return true\n    }\n"
 elif variant == "nowiring":
@@ -92,6 +107,10 @@ elif variant == "noreal":
     stripped = re.sub(r"            guard Self\.hasRealOwnedDirectories\(path: standardized, containerURL: containerURL\) else \{\n.*?\n            \}\n", "", remover, count=1, flags=re.S)
     assert stripped != remover, "real-directory guard not found"
     remover = stripped
+elif variant in sweep_mutations:
+    old, new = sweep_mutations[variant]
+    assert old in sweep, f"sweep mutation target not found for {variant}"
+    sweep = sweep.replace(old, new, 1)
 elif variant == "noleaf":
     # Accept any thumbnail leaf name instead of <UUID>.jpg.
     leaf = "    static func isThumbnailLeaf(_ name: String) -> Bool {\n        return true\n    }\n"
@@ -107,7 +126,7 @@ elif variant == "noscope":
     remover = stripped
 with open(os.path.join(out, "ContainerGuard.swift"), "w") as f:
     f.write("import Foundation\n\npublic enum ContainerGuard {\n" + constants + "// BEGIN VERBATIM\n"
-            + guard + regular + leaf + realdirs + owned + relative + emptydir + filepath + "    @discardableResult\n" + remover + "// END VERBATIM\n}\n")
+            + guard + regular + leaf + realdirs + owned + relative + emptydir + filepath + sweep + refpaths + "    @discardableResult\n" + remover + "// END VERBATIM\n}\n")
 
 # Share-extension helpers (static functions of the controller class).
 a, b, schemehost = block(controller, "    static func schemeSafeHost(")
@@ -227,6 +246,8 @@ source_mutations = {
     "nopostcheck": [("guard Self.isRegularFileOnDisk(dstURL) else {", "guard true else {")],
     "nodefaultsguard": [("        guard let ud = UserDefaults(suiteName: appGroupId) else {\n            cleanupStagedFiles()\n            completeAndExit()\n            return\n        }\n", "        let ud = UserDefaults(suiteName: appGroupId)!\n")],
     "noprecondition": [("    func newShareDestination(named name: String) -> URL? {\n        dispatchPrecondition(condition: .onQueue(stateQueue))\n", "    func newShareDestination(named name: String) -> URL? {\n")],
+    "cancelnoclaim": [("        if claimCompletion() {\n            super.didSelectCancel()\n        }", "        super.didSelectCancel()")],
+    "postnoguard": [("        guard hasSettledLoads else { return }\n", "")],
     "nouiqueue": [("        DispatchQueue.main.async {\n            let alert", "        do {\n            let alert")],
 }
 if variant in source_mutations:
@@ -258,7 +279,7 @@ queue_safe_functions = {
     "writeTempImage", "newShareDestination", "getSharedMediaFile",
     "stageOnStateQueue", "abortAndCleanup", "cleanupStagedFiles", "didSelectPost", "decideDelivery",
 }
-lock_only_functions = {"isAbortedNow", "markAborted", "completeRequestOnce"}
+lock_only_functions = {"isAbortedNow", "markAborted", "claimCompletion"}
 
 
 def accesses(names, allowed):
@@ -308,6 +329,9 @@ pins = {
     "rootsAreCheckedBeforeStaging": "isUsableRoot(root)" in destination and "isUsableRoot(directory)" in thumb_path,
     "stagingRunsOnTheStateQueue": "dispatchPrecondition(condition: .onQueue(stateQueue))" in destination
         and "dispatchPrecondition(condition: .onQueue(stateQueue))" in thumbnail,
+    "cancelClaimsCompletionBeforeSuper": ordered(cancel, "claimCompletion()", "super.didSelectCancel()"),
+    "postIgnoresUnsettledLoads": "guard hasSettledLoads else { return }" in func_text(source, "    open override func didSelectPost(")
+        and ordered(func_text(source, "    open override func didSelectPost("), "guard hasSettledLoads", "saveAndRedirect()"),
     "cancelAbortsBeforeSuper": "abortAndCleanup()" in cancel and "super.didSelectCancel()" in cancel
         and ordered(cancel, "abortAndCleanup()", "super.didSelectCancel()"),
     "errorPathAborts": "abortAndCleanup()" in dismiss,
