@@ -128,14 +128,14 @@ open class FSIShareViewController: SLComposeServiceViewController {
     }
     
     open override func didSelectCancel() {
-        // The base class does not clean up: mark the share aborted FIRST, so
-        // loads still in flight stage nothing, then remove what is staged.
+        // Claim the completion FIRST. A lost claim means the share was already
+        // delivered or already cleaned up after an error, so Cancel must not
+        // delete anything.
+        guard claimCompletion() else { return }
+        // The base class does not clean up: mark the share aborted, so loads
+        // still in flight stage nothing, then remove what is staged.
         abortAndCleanup()
-        // The base class completes the request itself, so claim the completion
-        // first: after an error alert the request may already be completed.
-        if claimCompletion() {
-            super.didSelectCancel()
-        }
+        super.didSelectCancel()
     }
 
     open override func isContentValid() -> Bool {

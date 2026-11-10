@@ -39,6 +39,9 @@
 >     Every other path is ignored, and links are never followed;
 >   - out-of-range media-type values and wrongly typed fields no longer crash decoding.
 >
+> **Host contract.** The host app must copy shared files out promptly and call `cleanup`. On iOS the plugin removes
+> share directories and thumbnails that are older than 24 hours and not named in the pending payload.
+>
 > **iOS share extension.** Copy [`ios/Classes/FSIShareViewController.swift`](ios/Classes/FSIShareViewController.swift)
 > into your Share Extension target. The iOS changes above live in that file; the copy under
 > `example/ios/Share Extension/` is identical to it.

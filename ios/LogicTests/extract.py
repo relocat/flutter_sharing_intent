@@ -20,8 +20,8 @@ Source-pin controls (a mutated copy of the controller feeds the pin scan):
   softprotect, noroot, latedefaults, multiwrite, nouiqueue, unsafeaccess, noemptyclean,
   nofinish, nodrop, noskipfinished, noselfclean, noclearmedia, postalwaysvalid,
   unlockedflag, syncabort, doublecomplete, nopostcheck, nodefaultsguard, noprecondition,
-  cancelnoclaim, postnoguard.
-Sweep controls (sweepStaleFiles): sweepall (no age check), sweepreferenced, sweepfollow
+  cancelnoclaim, cancelswap, postnoguard.
+Sweep controls (sweepStaleFiles): sweepall (no age check), sweepreferenced, sweepfullpath (match by full path), sweepfollow
   (no file-type check), sweepnonuuid, sweeprootlink (no real-root check).
 Helper controls: rootany (any error counts as a missing root), destok (the post-copy
   check accepts everything), followlinks (removeStagedItems follows links), rootok and copyok
@@ -77,8 +77,8 @@ a, b, filepath = block(plugin, "    static func filePath(fromFileIdentifier")
 report("filePath", plugin, a, b, filepath)
 a, b, sweep = block(plugin, "    static func sweepStaleFiles(")
 report("sweepStaleFiles", plugin, a, b, sweep)
-a, b, refpaths = block(plugin, "    static func referencedPaths(")
-report("referencedPaths", plugin, a, b, refpaths)
+a, b, refpaths = block(plugin, "    static func referencedKeys(")
+report("referencedKeys", plugin, a, b, refpaths)
 a, b, remover = block(plugin, "    static func removeOwnedFiles(")
 report("removeOwnedFiles", plugin, a, b, remover)
 constants = "".join(line(plugin, prefix) + "\n" for prefix in ("    static let kShareRootName", "    static let kThumbnailRootName", "    static let kStaleFileMaxAgeSeconds"))
@@ -90,7 +90,8 @@ assert "Self.removeOwnedFiles(paths: paths, containerURL: groupUrl)" in open(os.
 sweep_mutations = {
     "sweepall": ("let modified = attributes[.modificationDate] as? Date, modified < cutoff else { continue }",
                  "let _ = attributes[.modificationDate] as? Date else { continue }"),
-    "sweepreferenced": ("if referencedPaths.contains(where: { $0 == childPath || $0.hasPrefix(childPath + \"/\") }) { continue }\n", ""),
+    "sweepreferenced": ("if referencedKeys.contains(key) { continue }\n", ""),
+    "sweepfullpath": ("let key = rootName + \"/\" + name.lowercased()", "let key = child.standardizedFileURL.path"),
     "sweepfollow": ("(attributes[.type] as? FileAttributeType) == (isShareRoot ? .typeDirectory : .typeRegular),\n                      ", ""),
     "sweepnonuuid": ("guard isShareRoot ? UUID(uuidString: name) != nil : isThumbnailLeaf(name) else { continue }", "guard true else { continue }"),
     "sweeprootlink": ("(rootAttributes[.type] as? FileAttributeType) == .typeDirectory,\n                  let names", "true,\n                  let names"),
@@ -246,7 +247,9 @@ source_mutations = {
     "nopostcheck": [("guard Self.isRegularFileOnDisk(dstURL) else {", "guard true else {")],
     "nodefaultsguard": [("        guard let ud = UserDefaults(suiteName: appGroupId) else {\n            cleanupStagedFiles()\n            completeAndExit()\n            return\n        }\n", "        let ud = UserDefaults(suiteName: appGroupId)!\n")],
     "noprecondition": [("    func newShareDestination(named name: String) -> URL? {\n        dispatchPrecondition(condition: .onQueue(stateQueue))\n", "    func newShareDestination(named name: String) -> URL? {\n")],
-    "cancelnoclaim": [("        if claimCompletion() {\n            super.didSelectCancel()\n        }", "        super.didSelectCancel()")],
+    "cancelnoclaim": [("        guard claimCompletion() else { return }\n", "")],
+    "cancelswap": [("        guard claimCompletion() else { return }\n        // The base class does not clean up: mark the share aborted, so loads\n        // still in flight stage nothing, then remove what is staged.\n        abortAndCleanup()\n",
+                    "        abortAndCleanup()\n        guard claimCompletion() else { return }\n")],
     "postnoguard": [("        guard hasSettledLoads else { return }\n", "")],
     "nouiqueue": [("        DispatchQueue.main.async {\n            let alert", "        do {\n            let alert")],
 }
@@ -330,6 +333,7 @@ pins = {
     "stagingRunsOnTheStateQueue": "dispatchPrecondition(condition: .onQueue(stateQueue))" in destination
         and "dispatchPrecondition(condition: .onQueue(stateQueue))" in thumbnail,
     "cancelClaimsCompletionBeforeSuper": ordered(cancel, "claimCompletion()", "super.didSelectCancel()"),
+    "cancelClaimsBeforeItCleansUp": ordered(cancel, "guard claimCompletion() else { return }", "abortAndCleanup()", "super.didSelectCancel()"),
     "postIgnoresUnsettledLoads": "guard hasSettledLoads else { return }" in func_text(source, "    open override func didSelectPost(")
         and ordered(func_text(source, "    open override func didSelectPost("), "guard hasSettledLoads", "saveAndRedirect()"),
     "cancelAbortsBeforeSuper": "abortAndCleanup()" in cancel and "super.didSelectCancel()" in cancel

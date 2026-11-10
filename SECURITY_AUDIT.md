@@ -482,12 +482,15 @@ controls for each change and for the log allowlist. iOS: `ios/LogicTests/`.
   is checked again after it was made, because `cleanup` removes regular files only.
 - The plugin sweeps leftovers of interrupted shares when it registers, off the main thread: a UUID-named share
   directory or a `<UUID>.jpg` thumbnail under the two plugin directories is removed when it is older than 24 hours
-  and is not named in the pending payload. The sweep applies the same rules as `cleanup`: the plugin directories must
+  and is not named in the pending payload. The sweep applies the same real-directory and no-follow rules as `cleanup`: the plugin directories must
   be real directories, symbolic links are never followed or removed, and any other name or place is never touched.
-  This bounds how long a leftover can live.
+  Items are matched against the payload by their UUID names, not by the full path, so a different container prefix
+  cannot make a referenced item look unreferenced. This bounds how long a leftover can live.
+- Host contract: the host app must copy shared files out and call `cleanup` promptly. Shares that are not cleaned
+  within the sweep threshold (24 hours) are removed.
 - Residual: if the extension process is killed during a copy, the files of that share stay until the sweep removes
   them, and a copy that was in progress may not yet have been raised to complete protection.
-- `didSelectCancel` claims the request completion before calling the base class, and `didSelectPost` ignores a
+- `didSelectCancel` claims the request completion first, and only a winning claim cleans up and calls the base class, and `didSelectPost` ignores a
   Post made before all loads settled.
 - A symbolic link in place of the plugin directory or the thumbnail directory is refused before staging, and so
   is any error other than "no such file" while checking it.

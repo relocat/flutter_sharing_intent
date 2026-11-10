@@ -298,23 +298,35 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                 if let thumbnail = file.thumbnail { identifiers.append(thumbnail) }
             }
         }
-        let referenced = Self.referencedPaths(fromIdentifiers: identifiers)
+        let referenced = Self.referencedKeys(fromIdentifiers: identifiers)
         DispatchQueue.global(qos: .utility).async {
-            _ = Self.sweepStaleFiles(containerURL: container, referencedPaths: referenced,
+            _ = Self.sweepStaleFiles(containerURL: container, referencedKeys: referenced,
                                      now: Date(), maxAge: Self.kStaleFileMaxAgeSeconds)
         }
     }
 
-    /// The standardised filesystem paths named by stored file identifiers
-    /// (`file://` URLs or plain paths); identifiers that do not convert are skipped.
-    static func referencedPaths(fromIdentifiers identifiers: [String]) -> Set<String> {
-        var paths = Set<String>()
+    /// The keys of the plugin items named by stored file identifiers (`file://`
+    /// URLs or plain paths): `<root>/<uuid>` for a path inside a share directory
+    /// and `<root>/<uuid>.jpg` for a thumbnail, with the UUID lowercased. Only
+    /// the components after the plugin root name are used, so a different
+    /// container prefix (for example `/private/var` instead of `/var`) cannot
+    /// make a referenced item look unreferenced. Identifiers that do not convert
+    /// or do not have the plugin shape are skipped.
+    static func referencedKeys(fromIdentifiers identifiers: [String]) -> Set<String> {
+        var keys = Set<String>()
         for identifier in identifiers {
-            if let path = filePath(fromFileIdentifier: identifier) {
-                paths.insert(URL(fileURLWithPath: path).standardizedFileURL.path)
+            guard let path = filePath(fromFileIdentifier: identifier) else { continue }
+            let components = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+            for index in components.indices.dropLast() {
+                let next = components[index + 1]
+                if components[index] == kShareRootName, UUID(uuidString: next) != nil {
+                    keys.insert(kShareRootName + "/" + next.lowercased())
+                } else if components[index] == kThumbnailRootName, isThumbnailLeaf(next) {
+                    keys.insert(kThumbnailRootName + "/" + next.lowercased())
+                }
             }
         }
-        return paths
+        return keys
     }
 
     /// Removes leftovers of interrupted shares and returns how many were
@@ -322,11 +334,11 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
     /// candidates: a UUID-named directory under `flutter_sharing_intent` and a
     /// `<UUID>.jpg` regular file under `flutter_sharing_intent_thumbnails`. An
     /// entry is removed only if it is older than `maxAge` and neither it nor
-    /// anything inside it is in `referencedPaths`. A root must be a real
+    /// anything inside it is in `referencedKeys`. A root must be a real
     /// directory; a symbolic link (as a root or as an entry), any other name and
     /// anything outside the two roots is never touched or followed.
     @discardableResult
-    static func sweepStaleFiles(containerURL: URL, referencedPaths: Set<String>, now: Date, maxAge: TimeInterval) -> Int {
+    static func sweepStaleFiles(containerURL: URL, referencedKeys: Set<String>, now: Date, maxAge: TimeInterval) -> Int {
         let fm = FileManager.default
         let cutoff = now.addingTimeInterval(-maxAge)
         let container = containerURL.standardizedFileURL
@@ -343,8 +355,8 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterStreamHandler, Fl
                 guard let attributes = try? fm.attributesOfItem(atPath: child.path),
                       (attributes[.type] as? FileAttributeType) == (isShareRoot ? .typeDirectory : .typeRegular),
                       let modified = attributes[.modificationDate] as? Date, modified < cutoff else { continue }
-                let childPath = child.standardizedFileURL.path
-                if referencedPaths.contains(where: { $0 == childPath || $0.hasPrefix(childPath + "/") }) { continue }
+                let key = rootName + "/" + name.lowercased()
+                if referencedKeys.contains(key) { continue }
                 if (try? fm.removeItem(at: child)) != nil { removedCount += 1 }
             }
         }

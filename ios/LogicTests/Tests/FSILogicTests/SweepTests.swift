@@ -38,7 +38,7 @@ final class SweepTests: XCTestCase {
     }
 
     func sweep(now: Date, referenced: Set<String> = []) -> Int {
-        ContainerGuard.sweepStaleFiles(containerURL: container, referencedPaths: referenced, now: now,
+        ContainerGuard.sweepStaleFiles(containerURL: container, referencedKeys: referenced, now: now,
                                        maxAge: ContainerGuard.kStaleFileMaxAgeSeconds)
     }
 
@@ -62,7 +62,7 @@ final class SweepTests: XCTestCase {
         let referencedShare = try shareDirectory(age: 10 * day, now: now)
         let referencedThumbnail = try thumbnail(age: 10 * day, now: now)
         let unreferenced = try shareDirectory(age: 10 * day, now: now)
-        let referenced = ContainerGuard.referencedPaths(fromIdentifiers: [
+        let referenced = ContainerGuard.referencedKeys(fromIdentifiers: [
             referencedShare.appendingPathComponent("a.txt").absoluteString,
             referencedThumbnail.absoluteString,
         ])
@@ -120,8 +120,30 @@ final class SweepTests: XCTestCase {
         for url in [notAUuid, looseThumbnail, wrongExtension, elsewhere, rootFile] { XCTAssertTrue(exists(url), url.path) }
     }
 
-    func testReferencedPathsDecodeEscapes() {
-        XCTAssertEqual(ContainerGuard.referencedPaths(fromIdentifiers: ["file:///a/b%20c/x.txt", "/plain/path"]),
-                       ["/a/b c/x.txt", "/plain/path"])
+    func testReferencedKeysIgnoreTheContainerPrefix() throws {
+        let now = Date()
+        let uuid = UUID().uuidString
+        let share = try shareDirectory(uuid, age: 10 * day, now: now)
+        let thumbnailName = "\(UUID().uuidString).jpg"
+        let thumb = try thumbnail(thumbnailName, age: 10 * day, now: now)
+        let other = try shareDirectory(age: 10 * day, now: now)
+        // The payload names the files under a different prefix (as `/private/var`
+        // versus `/var` would), and in lowercase.
+        let referenced = ContainerGuard.referencedKeys(fromIdentifiers: [
+            "file:///private/var/other/prefix/\(ContainerGuard.kShareRootName)/\(uuid.lowercased())/a.txt",
+            "/another/root/\(ContainerGuard.kThumbnailRootName)/\(thumbnailName)",
+        ])
+        XCTAssertEqual(sweep(now: now, referenced: referenced), 1)
+        XCTAssertTrue(exists(share))
+        XCTAssertTrue(exists(thumb))
+        XCTAssertFalse(exists(other))
+    }
+
+    func testReferencedKeysIgnoreShapesThatAreNotPluginItems() {
+        XCTAssertEqual(ContainerGuard.referencedKeys(fromIdentifiers: [
+            "file:///a/b%20c/x.txt", "/plain/path",
+            "/c/\(ContainerGuard.kShareRootName)/not-a-uuid/a.txt",
+            "/c/\(ContainerGuard.kThumbnailRootName)/t.jpg",
+        ]), [])
     }
 }
